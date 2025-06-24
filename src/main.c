@@ -237,6 +237,7 @@ void mainloop()
       EsbPacket* packet = &esbRxPacket;
       esbReceived = false;
 
+      // Check for high-priority command packets first
       if((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
       {
         handleRadioCmd(packet);
@@ -245,15 +246,24 @@ void mainloop()
       {
         handleBootloaderCmd(packet);
       }
-      else
+      else  // This is the final 'else' that handles all other data packets
       {
+        // Check if this is a P2P packet
         if (p2p == false) {
-          memcpy(slTxPacket.data, packet->data, packet->size);
+          // This is a standard GCS packet (not P2P)
+          memcpy(slTxPacket.data, packet->data, packet->size);  // Prepare the Syslink packet for the STM32
           slTxPacket.length = packet->size;
           if (broadcast) {
             slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
+            
+            // Use the original blocking send for broadcast packets
+            syslinkSend(&slTxPacket);
           } else {
-            slTxPacket.type = SYSLINK_RADIO_RAW;
+            // This is a standard unicast packet from the GCS
+            slTxPacket.type = SYSLINK_RADIO_MAVLINK;
+
+            // Use the new non-blocking function to send to the STM32
+            syslinkSend_buffered(&slTxPacket);
           }
         } else {
           // The first byte sent is the P2P port
@@ -266,8 +276,9 @@ void mainloop()
           } else {
             slTxPacket.type = SYSLINK_RADIO_P2P;
           }
+          // Use the original blocking send for P2P packets
+          syslinkSend(&slTxPacket);
         }
-        syslinkSend(&slTxPacket);
       }
     }
 
@@ -381,6 +392,11 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.length = 1;
           syslinkSend(&slTxPacket);
         }
+        break;
+      case SYSLINK_RADIO_MAVLINK:
+        // This new case uses new buffered, non-blocking function
+        // when forwarding MAVLink data back to the STM32.
+        syslinkSend_buffered(&slTxPacket);
         break;
       case SYSLINK_PM_ONOFF_SWITCHOFF:
         pmSetState(pmAllOff);

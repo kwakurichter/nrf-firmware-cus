@@ -34,6 +34,8 @@ void uartPuts(char* string);
 
 void uartSend(char* data, int len);
 
+void uart_buffered_send(const uint8_t *data, uint16_t length); // For Ardupilot Implementation (Non-Blocking send)
+
 void uartPutc(char c);
 
 bool uartIsDataReceived();

@@ -35,6 +35,14 @@ static bool isInit = false;
 
 #define Q_LENGTH 128
 
+// -- For ArduPilot Implementation --
+#define UART_TX_BUFFER_SIZE 256
+
+static volatile uint8_t uart_tx_buffer[UART_TX_BUFFER_SIZE];
+static volatile uint16_t uart_tx_head = 0;
+static volatile uint16_t uart_tx_tail = 0;
+// -- For ArduPilot Implementation --
+
 static volatile char rxq[Q_LENGTH];
 static volatile int head = 0;
 static volatile int tail = 0;
@@ -47,28 +55,44 @@ static volatile uint8_t uartErrorCount = 0;
 
 void UART0_IRQHandler()
 {
-  int nhead = head+1;
+  // --- Existing RX handling code ---
+  if (NRF_UART0->EVENTS_RXDRDY) {
+    int nhead = head+1;
 
-  if (NRF_UART0->ERRORSRC) {
-    uartError = NRF_UART0->ERRORSRC;
-    NRF_UART0->ERRORSRC = 0xFF;
+    if (NRF_UART0->ERRORSRC) {
+      uartError = NRF_UART0->ERRORSRC;
+      NRF_UART0->ERRORSRC = 0xFF;
 
-    uartErrorCount++;
+      uartErrorCount++;
+    }
+
+    NRF_UART0->EVENTS_RXDRDY = 0;
+
+    // Check if the queue is not full
+    if (nhead >= Q_LENGTH) nhead = 0;
+    if (nhead == tail) {
+      dummy = NRF_UART0->RXD; //Read anyway to avoid hw overflow
+      dropped++;
+      return;
+    }
+
+    // Push data in queue
+    rxq[head++] = NRF_UART0->RXD;
+    if (head >= Q_LENGTH) head = 0;
   }
+  // --- New TX handling code ---
+  if (NRF_UART0->EVENTS_TXDRDY) {
+    NRF_UART0->EVENTS_TXDRDY = 0;
 
-  NRF_UART0->EVENTS_RXDRDY = 0;
-
-  // Check if the queue is not full
-  if (nhead >= Q_LENGTH) nhead = 0;
-  if (nhead == tail) {
-    dummy = NRF_UART0->RXD; //Read anyway to avoid hw overflow
-    dropped++;
-    return;
+    if (uart_tx_head != uart_tx_tail) {
+      // If there is data in our new buffer, send the next byte
+      NRF_UART0->TXD = uart_tx_buffer[uart_tx_tail];
+      uart_tx_tail = (uart_tx_tail + 1) % UART_TX_BUFFER_SIZE;
+    } else {
+      // Buffer is empty, disable the TX interrupt until more data is added
+      NRF_UART0->INTENCLR = UART_INTENCLR_TXDRDY_Msk;
+    }
   }
-
-  // Push data in queue
-  rxq[head++] = NRF_UART0->RXD;
-  if (head >= Q_LENGTH) head = 0;
 }
 
 void uartInit()
@@ -143,6 +167,22 @@ void uartSend(char* data, int len)
   {
     uartPutc(*data++);
   }
+}
+
+// For Ardupilot Implementation (Non-Blocking send)
+void uart_buffered_send(const uint8_t *data, uint16_t length) {
+  for (uint16_t i = 0; i < length; i++) {
+    uint16_t next_head = (uart_tx_head + 1) % UART_TX_BUFFER_SIZE;
+    if (next_head == uart_tx_tail) {
+      // Buffer is full, handle error or drop data
+      break;
+    }
+    uart_tx_buffer[uart_tx_head] = data[i];
+    uart_tx_head = next_head;
+  }
+  
+  // Enable the TXDRDY interrupt to start sending
+  NRF_UART0->INTENSET = UART_INTENSET_TXDRDY_Msk;
 }
 
 void uartPutc(char c)
