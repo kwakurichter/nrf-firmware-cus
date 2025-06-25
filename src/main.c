@@ -193,10 +193,9 @@ int main()
 
 void mainloop()
 {
-  static EsbPacket esbRxPacket;
-  bool esbReceived = false;
+  //static EsbPacket esbRxPacket;
+  //bool esbReceived = false;
   static bool broadcast;
-  static bool p2p;
 
   while(1)
   {
@@ -221,8 +220,6 @@ if (esbIsRxPacket())
   // Step 1: Get the packet from the radio's receive queue.
   EsbPacket* packet = esbGetRxPacket();
 
-  p2p = false;
-
   //Store RSSI here so that we can send it to STM later
   // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P
   rssi = packet->rssi;
@@ -245,8 +242,7 @@ if (esbIsRxPacket())
   else if (packet->size >= 2 && (packet->data[0] & 0xf3) == 0xf3 && (packet->data[1] & 0xF0) == 0x80)
   {
     // Handle P2P logic (forward to STM with SYSLINK_RADIO_P2P type)
-    p2p = true;
-    esbRxPacket.rssi = packet->rssi;
+    //esbRxPacket.rssi = packet->rssi;
 
     slTxPacket.data[0] = packet->data[1] & 0x0F;  // The first byte sent is the P2P port
     slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
