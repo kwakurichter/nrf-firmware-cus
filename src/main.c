@@ -201,9 +201,9 @@ void mainloop()
   {
 #ifdef BLE
     if (bleEnabled) {
-      if ((esbReceived == false) && ble_receive_packet(&esbRxPacket)) {
-        esbReceived = true;
-      }
+      //if ((esbReceived == false) && ble_receive_packet(&esbRxPacket)) {
+      //  esbReceived = true;
+      //}
     }
 #endif
 
@@ -248,12 +248,9 @@ if (esbIsRxPacket())
     slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
     memcpy(&slTxPacket.data[2], &packet->data[2], packet->size-2);
     slTxPacket.length = packet->size;
-    if (broadcast)
-    {
+    if (broadcast) {
       slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
-    }
-    else
-    {
+    } else {
       slTxPacket.type = SYSLINK_RADIO_P2P;
     }
 
@@ -265,12 +262,9 @@ if (esbIsRxPacket())
     slTxPacket.length = packet->size;
     memcpy(slTxPacket.data, packet->data, packet->size);
 
-    if (broadcast)
-    {
+    if (broadcast) {
       slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
-    }
-    else
-    {
+    } else {
       // --- THIS IS NEW GCS->STM FORWARDING LOGIC ---
       slTxPacket.type = SYSLINK_RADIO_MAVLINK;
     }
@@ -339,7 +333,8 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CHANNEL;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          //syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedChan = true;
         }
@@ -352,7 +347,8 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_DATARATE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          //syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedRate = true;
         }
@@ -364,7 +360,8 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CONTWAVE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          //syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
       case SYSLINK_RADIO_ADDRESS:
@@ -377,7 +374,8 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_ADDRESS;
           memcpy(slTxPacket.data, slRxPacket.data, 5);
           slTxPacket.length = 5;
-          syslinkSend(&slTxPacket);
+          //syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedAddress = true;
         }
@@ -390,13 +388,29 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_POWER;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          //syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
       case SYSLINK_RADIO_MAVLINK:
-        // This new case uses new buffered, non-blocking function
-        // when forwarding MAVLink data back to the STM32.
-        syslinkSend_buffered(&slTxPacket);
+        // Check if the radio TX queue has space and the packet isn't too large
+        if (esbCanTxPacket() && (slRxPacket.length < SYSLINK_MTU))
+        {
+          // Get a free radio packet buffer
+          EsbPacket* packet = esbGetTxPacket();
+
+          if (packet) {
+            // Copy the data from the Syslink packet into the radio packet
+            memcpy(packet->data, slRxPacket.data, slRxPacket.length);
+            packet->size = slRxPacket.length;
+
+            // Queue the radio packet for transmission
+            esbSendTxPacket();
+          }
+          
+          // Clear the received syslink packet data buffer for safety
+          bzero(slRxPacket.data, SYSLINK_MTU);
+        }
         break;
       case SYSLINK_PM_ONOFF_SWITCHOFF:
         pmSetState(pmAllOff);
@@ -406,7 +420,8 @@ static void handleSyslinkEvents(bool slReceived)
       case SYSLINK_OW_SCAN:
       case SYSLINK_OW_WRITE:
         if (memorySyslink(&slRxPacket)) {
-          syslinkSend(&slRxPacket);
+          //syslinkSend(&slRxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
       case SYSLINK_RADIO_P2P_BROADCAST:
@@ -436,7 +451,8 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[len++] = '\0';
 
         slTxPacket.length = len;
-        syslinkSend(&slTxPacket);
+        //syslinkSend(&slTxPacket);
+        syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
       } break;
       case SYSLINK_PM_BATTERY_AUTOUPDATE:
         syslinkEnableBatteryMessages();
@@ -463,7 +479,8 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[7] = syslinkGetRxCheckSum2ErrorCnt();
 
         slTxPacket.length = 8;
-        syslinkSend(&slTxPacket);
+        //syslinkSend(&slTxPacket);
+        syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
       }
         break;
     }
@@ -504,7 +521,8 @@ static void sendDataToStmOverSyslink()
       slTxPacket.length += 4;
       memcpy(slTxPacket.data + 1 + 8, &fdata, sizeof(float));
     #endif
-      syslinkSend(&slTxPacket);
+      //syslinkSend(&slTxPacket);
+      syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
     }
 
     //Send an RSSI sample to the STM every 10ms(100Hz)
@@ -517,7 +535,8 @@ static void sendDataToStmOverSyslink()
       slTxPacket.length = sizeof(uint8_t);
       memcpy(slTxPacket.data, &rssi, sizeof(uint8_t));
 
-      syslinkSend(&slTxPacket);
+      //syslinkSend(&slTxPacket);
+      syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
     }
   }
 }
