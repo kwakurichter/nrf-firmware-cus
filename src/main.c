@@ -101,6 +101,7 @@ static void disableBle();
 static bool debugProbeReceivedChan = false;
 static bool debugProbeReceivedAddress = false;
 static bool debugProbeReceivedRate = false;
+static bool bleIsDisabled = false;  // Added flag
 
 int main()
 {
@@ -209,81 +210,84 @@ void mainloop()
 
 #ifndef CONT_WAVE_TEST
 
-    if ((esbReceived == false) && esbIsRxPacket())
-    {
-      EsbPacket* packet = esbGetRxPacket();
-      //Store RSSI here so that we can send it to STM later
-      // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P
-      rssi = packet->rssi;
-      // The received packet was a broadcast, if received on local address 1
-      broadcast = packet->match == ESB_MULTICAST_ADDRESS_MATCH;
-      // If the packet is a null packet with data[1] == 0x8*, it is a P2P packet
-      if (packet->size >= 2 && (packet->data[0] & 0xf3) == 0xf3 && (packet->data[1] & 0xF0) == 0x80) {
-        p2p = true;
-        esbRxPacket.rssi = packet->rssi;
-      } else {
-        p2p = false;
-      }
-      memcpy(esbRxPacket.data, packet->data, packet->size);
-      esbRxPacket.size = packet->size;
-      esbReceived = true;
-      esbReleaseRxPacket(packet);
+if (esbIsRxPacket())
+{
+  // Only disable BLE once when the first ESB packet is received.
+  if (!bleIsDisabled) {
+    disableBle();
+    bleIsDisabled = true;
+  }
+  
+  // Step 1: Get the packet from the radio's receive queue.
+  EsbPacket* packet = esbGetRxPacket();
 
-      disableBle();
+  p2p = false;
+
+  //Store RSSI here so that we can send it to STM later
+  // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P
+  rssi = packet->rssi;
+
+  // The received packet was a broadcast, if received on local address 1
+  broadcast = packet->match == ESB_MULTICAST_ADDRESS_MATCH;
+
+  // Now, inspect the packet and decide what to do with it.
+  // Is it a special radio command packet?
+  if ((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
+  {
+    handleRadioCmd(packet);
+  }
+  // Is it a special bootloader command packet?
+  else if ((packet->size > 2) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0xfe))
+  {
+    handleBootloaderCmd(packet);
+  }
+  // Is it a peer-to-peer (P2P) packet?
+  else if (packet->size >= 2 && (packet->data[0] & 0xf3) == 0xf3 && (packet->data[1] & 0xF0) == 0x80)
+  {
+    // Handle P2P logic (forward to STM with SYSLINK_RADIO_P2P type)
+    p2p = true;
+    esbRxPacket.rssi = packet->rssi;
+
+    slTxPacket.data[0] = packet->data[1] & 0x0F;  // The first byte sent is the P2P port
+    slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
+    memcpy(&slTxPacket.data[2], &packet->data[2], packet->size-2);
+    slTxPacket.length = packet->size;
+    if (broadcast)
+    {
+      slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
+    }
+    else
+    {
+      slTxPacket.type = SYSLINK_RADIO_P2P;
     }
 
-    if (esbReceived)
+    syslinkSend_buffered(&slTxPacket);
+  }
+  // If it's none of the above, assume it's general data from the GCS.
+  else
+  {
+    slTxPacket.length = packet->size;
+    memcpy(slTxPacket.data, packet->data, packet->size);
+
+    if (broadcast)
     {
-      EsbPacket* packet = &esbRxPacket;
-      esbReceived = false;
-
-      // Check for high-priority command packets first
-      if((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
-      {
-        handleRadioCmd(packet);
-      }
-      else if ((packet->size >2) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0xfe))
-      {
-        handleBootloaderCmd(packet);
-      }
-      else  // This is the final 'else' that handles all other data packets
-      {
-        // Check if this is a P2P packet
-        if (p2p == false) {
-          // This is a standard GCS packet (not P2P)
-          memcpy(slTxPacket.data, packet->data, packet->size);  // Prepare the Syslink packet for the STM32
-          slTxPacket.length = packet->size;
-          if (broadcast) {
-            slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
-            
-            // Use the original blocking send for broadcast packets
-            syslinkSend(&slTxPacket);
-          } else {
-            // This is a standard unicast packet from the GCS
-            slTxPacket.type = SYSLINK_RADIO_MAVLINK;
-
-            // Use the new non-blocking function to send to the STM32
-            syslinkSend_buffered(&slTxPacket);
-          }
-        } else {
-          // The first byte sent is the P2P port
-          slTxPacket.data[0] = packet->data[1] & 0x0F;
-          slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
-          memcpy(&slTxPacket.data[2], &packet->data[2], packet->size-2);
-          slTxPacket.length = packet->size;
-          if (broadcast) {
-            slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
-          } else {
-            slTxPacket.type = SYSLINK_RADIO_P2P;
-          }
-          // Use the original blocking send for P2P packets
-          syslinkSend(&slTxPacket);
-        }
-      }
+      slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
     }
+    else
+    {
+      // --- THIS IS NEW GCS->STM FORWARDING LOGIC ---
+      slTxPacket.type = SYSLINK_RADIO_MAVLINK;
+    }
+    // Use the buffered send for all transmissions
+    syslinkSend_buffered(&slTxPacket);
+  }
 
-    handleSyslinkEvents(syslinkReceive(&slRxPacket));
-    sendDataToStmOverSyslink();
+  // After processing, release the radio buffer for the next packet.
+  esbReleaseRxPacket();
+}
+
+handleSyslinkEvents(syslinkReceive(&slRxPacket));
+sendDataToStmOverSyslink();
 
 #endif
 
