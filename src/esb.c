@@ -485,6 +485,43 @@ void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
 
 }
 
+void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t length)
+{
+  // Check if there's space in the transmit queue.
+  if (!esbCanTxPacket())
+  {
+    return; // Not enough space, drop the debug packet.
+  }
+
+  // Get a pointer to the next available packet buffer in the queue.
+  EsbPacket* packet = esbGetTxPacket();
+  if (!packet)
+  {
+    return; // Should not happen if esbCanTxPacket() passed, but good practice.
+  }
+
+  // Check if the payload is too large. The CRTP header adds 1 byte.
+  // The max radio payload is 63, but cflib's CRTPPacket.MAX_DATA_SIZE is 30.
+  // We respect the smaller limit to be safe.
+  if (length > 29)
+  {
+    length = 29; // Truncate if too long.
+  }
+
+  // 1. Construct the CRTP header byte.
+  //    Format: [ 4-bit Port | 2-bit Reserved (must be 11) | 2-bit Channel ]
+  uint8_t crtp_header = ((port & 0x0F) << 4) | (0x03 << 2) | (channel & 0x03);
+  packet->data[0] = crtp_header;
+
+  // 2. Copy the actual debug data payload after the header.
+  memcpy(&packet->data[1], data, length);
+
+  // 3. Set the total size of the packet (header + payload).
+  packet->size = length + 1;
+
+  // 4. Mark the packet as ready to be sent by advancing the queue head.
+  esbSendTxPacket();
+}
 
 void esbSetDatarate(EsbDatarate dr)
 {

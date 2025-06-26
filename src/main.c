@@ -74,6 +74,7 @@ static void mainloop(void);
 #define MEMORY_BITCRAZE_VID 0xBC
 #define MEMORY_AIDECK_PID 0x12
 #define MEMORY_AIDECK_BOARDNAME "bcAI"
+#define DEBUG_PORT 0x0E // any unused CRTP port 0–15
 
 #ifdef BLE
 int volatile bleEnabled = 1;
@@ -219,6 +220,15 @@ if (esbIsRxPacket())
   
   // Step 1: Get the packet from the radio's receive queue.
   EsbPacket* packet = esbGetRxPacket();
+
+  // -- DEBUG --
+  uint8_t dbg[3];
+  dbg[0] = packet->size;        // how many bytes the nRF saw
+  dbg[1] = packet->data[0];     // first byte
+  dbg[2] = packet->data[1];     // second byte
+  // Queue a debug packet on DEBUG_PORT (0x0E), channel 0
+  esbSendDebugPacket(DEBUG_PORT, 0, (char*)dbg, sizeof(dbg));
+  // -- DEBUG --
 
   //Store RSSI here so that we can send it to STM later
   // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P

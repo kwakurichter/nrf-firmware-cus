@@ -89,6 +89,9 @@ EsbPacket * esbGetTxPacket();
 /* Immediately send a peer 2 peer packet in TX */
 void esbSendP2PPacket(uint8_t port, char *data, uint8_t length);
 
+/* Queues a CRTP-formatted debug packet for sending to the GCS */
+void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t length);
+
 /* Release and set for sending the buffer returned by getTxPacket */
 void esbSendTxPacket();
 
