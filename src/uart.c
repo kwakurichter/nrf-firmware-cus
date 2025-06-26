@@ -173,52 +173,50 @@ void uartSend(char* data, int len)
 
 // For Ardupilot Implementation (Non-Blocking send)
 void uart_buffered_send(const uint8_t *data, uint16_t length) {
-  // 1. PRE-CHECK BUFFER SPACE
+  // 1) Snapshot head/tail & compute free space
   uint16_t head = uart_tx_head;
   uint16_t tail = uart_tx_tail;
-  uint16_t available_space;
+  uint16_t free_space;
 
   if (head >= tail) {
-    available_space = UART_TX_BUFFER_SIZE - (head - tail) - 1;
+      free_space = UART_TX_BUFFER_SIZE - (head - tail) - 1;
   } else {
-    available_space = (tail - head) - 1;
+      free_space = (tail - head) - 1;
   }
 
-  // If the entire packet doesn't fit, discard it and return.
-  if (length > available_space) {
-    // uart_packets_dropped++;
-    return; // All-or-nothing: drop the entire packet
+  // Drop whole packet if it won't fit
+  if (length > free_space) {
+      // uart_packets_dropped++;
+      return;
   }
 
-  // Disable all interrupts to prevent race conditions.
+  // Remember if we were idle (so we know to prime the pump)
+  bool was_idle = (head == tail);
+
+  // 2) Disable all IRQs to protect head/tail
   __disable_irq();
-  
-  // 2. Queue all the data
-  uint16_t i;
-  for (i = 0; i < length; i++) {
-    // We already know it fits, so we don't need the check inside the loop
-    uart_tx_buffer[head] = data[i];
-    head = (head + 1) % UART_TX_BUFFER_SIZE;
+
+  // 3) Queue the data
+  for (uint16_t i = 0; i < length; i++) {
+      uart_tx_buffer[head] = data[i];
+      head = (head + 1) % UART_TX_BUFFER_SIZE;
   }
-  // update the head pointer once after queuing all bytes
   uart_tx_head = head;
-  
-  // 3. Prime the pump
-  // Because interrupts are off, we know the handler can't start at the same time.
 
-  if (NRF_UART0->EVENTS_TXDRDY) {
-    if (uart_tx_head != uart_tx_tail) {
-      NRF_UART0->EVENTS_TXDRDY = 0; // Clear the event
-
-      uint8_t first_byte = uart_tx_buffer[uart_tx_tail];
+  // 4) If buffer was empty before, kick off the first byte immediately
+  if (was_idle) {
+      // Clear any stale TXDRDY event
+      NRF_UART0->EVENTS_TXDRDY = 0;
+      // Send first byte
+      NRF_UART0->TXD = uart_tx_buffer[uart_tx_tail];
+      // Advance tail
       uart_tx_tail = (uart_tx_tail + 1) % UART_TX_BUFFER_SIZE;
-      NRF_UART0->TXD = first_byte;
-    }
   }
 
-  // 4. Re-enable the TX interrupt and then re-enable all interrupts.
-  // Order is important here.
+  // 5) Enable the TXDRDY interrupt so the ISR will send the rest
   NRF_UART0->INTENSET = UART_INTENSET_TXDRDY_Msk;
+
+  // 6) Re-enable IRQs
   __enable_irq();
 }
 
