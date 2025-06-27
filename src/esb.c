@@ -523,6 +523,47 @@ void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t lengt
   esbSendTxPacket();
 }
 
+void esbSendSyslinkMavlinkPacket(const struct syslinkPacket *slPacket)
+{
+  // Check if there's space in the transmit queue.
+  if (!esbCanTxPacket())
+  {
+    // Not enough space, drop the packet. This could be signaled back to STM
+    // in a more advanced implementation, but for now, we just drop it.
+    return;
+  }
+
+  // Get a pointer to the next available packet buffer in the queue.
+  EsbPacket* packet = esbGetTxPacket();
+  if (!packet)
+  {
+    return;
+  }
+
+  // Define the MAVLink port and channel for CRTP
+  const uint8_t MAVLINK_PORT = 0x0B;
+  const uint8_t MAVLINK_CHANNEL = 0;
+
+  // Truncate the payload if it's too large for a CRTP packet
+  uint8_t payload_len = slPacket->length;
+  if (payload_len > 30) {
+    payload_len = 30;
+  }
+
+  // 1. Construct the CRTP header byte.
+  uint8_t crtp_header = ((MAVLINK_PORT & 0x0F) << 4) | (0x03 << 2) | (MAVLINK_CHANNEL & 0x03);
+  packet->data[0] = crtp_header;
+
+  // 2. Copy the Syslink payload (the MAVLink data) after the header.
+  memcpy(&packet->data[1], slPacket->data, payload_len);
+
+  // 3. Set the total size of the radio packet (1-byte header + payload).
+  packet->size = payload_len + 1;
+
+  // 4. Mark the packet as ready to be sent by advancing the queue head.
+  esbSendTxPacket();
+}
+
 void esbSetDatarate(EsbDatarate dr)
 {
 #if !defined(RADIOTEST) || (RADIOTEST == 0)

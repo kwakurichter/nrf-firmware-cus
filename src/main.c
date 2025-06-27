@@ -76,6 +76,7 @@ static void mainloop(void);
 #define MEMORY_AIDECK_BOARDNAME "bcAI"
 #define DEBUG_PORT 0x0E // any unused CRTP port 0–15
 #define DEBUG_PORT_2 0x09 // Port for the second debug print
+#define DEBUG_PORT_3 0x0A // Port for the third debug print
 
 #ifdef BLE
 int volatile bleEnabled = 1;
@@ -251,12 +252,12 @@ if (esbIsRxPacket())
   }
 
   // -- DEBUG --
-  uint8_t dbg[3];
-  dbg[0] = safePacket.size;        // how many bytes the nRF saw
-  dbg[1] = safePacket.data[0];     // first byte
-  dbg[2] = safePacket.data[1];     // second byte
+  //uint8_t dbg[3];
+  //dbg[0] = safePacket.size;        // how many bytes the nRF saw
+  //dbg[1] = safePacket.data[0];     // first byte
+  //dbg[2] = safePacket.data[1];     // second byte
   // Queue a debug packet on DEBUG_PORT (0x0E), channel 0
-  esbSendDebugPacket(DEBUG_PORT, 0, (char*)dbg, sizeof(dbg));
+  //esbSendDebugPacket(DEBUG_PORT, 0, (char*)dbg, sizeof(dbg));
   // -- DEBUG --
 
   //Store RSSI here so that we can send it to STM later
@@ -322,12 +323,12 @@ if (esbIsRxPacket())
       slTxPacket.type = SYSLINK_RADIO_MAVLINK;
       
       // -- DEBUG --
-      uint8_t dbg2[3];
-      dbg2[0] = slTxPacket.length;      // how many bytes the nRF saw
-      dbg2[1] = slTxPacket.data[0];     // first byte
-      dbg2[2] = slTxPacket.data[1];     // second byte
+      //uint8_t dbg2[3];
+      //dbg2[0] = slTxPacket.length;      // how many bytes the nRF saw
+      //dbg2[1] = slTxPacket.data[0];     // first byte
+      //dbg2[2] = slTxPacket.data[1];     // second byte
       // Queue a debug packet on DEBUG_PORT_2 (0x09), channel 0
-      esbSendDebugPacket(DEBUG_PORT_2, 0, (char*)dbg2, sizeof(dbg2));
+      //esbSendDebugPacket(DEBUG_PORT_2, 0, (char*)dbg2, sizeof(dbg2));
       // -- DEBUG --
     }
     // Use the buffered send for all transmissions
@@ -452,24 +453,21 @@ static void handleSyslinkEvents(bool slReceived)
         }
         break;
       case SYSLINK_RADIO_MAVLINK:
-        // Check if the radio TX queue has space and the packet isn't too large
-        if (esbCanTxPacket() && (slRxPacket.length < SYSLINK_MTU))
-        {
-          // Get a free radio packet buffer
-          EsbPacket* packet = esbGetTxPacket();
+        // --- STM->GCS DEBUG ---
+        //{ // Use braces to create a local scope for the debug variable
+        //  uint8_t dbg_stm[3];
+        //  dbg_stm[0] = slRxPacket.length;
+        //  dbg_stm[1] = slRxPacket.data[0];
+        //  dbg_stm[2] = slRxPacket.data[1];
+          // Use DEBUG_PORT_3 (0x0A) to make this print distinct
+        //  esbSendDebugPacket(DEBUG_PORT_3, 0, (char*)dbg_stm, sizeof(dbg_stm));
+        //}
+        // --- END OF DEBUG ---
 
-          if (packet) {
-            // Copy the data from the Syslink packet into the radio packet
-            memcpy(packet->data, slRxPacket.data, slRxPacket.length);
-            packet->size = slRxPacket.length;
-
-            // Queue the radio packet for transmission
-            esbSendTxPacket();
-          }
-          
-          // Clear the received syslink packet data buffer for safety
-          bzero(slRxPacket.data, SYSLINK_MTU);
-        }
+        // The slRxPacket contains a MAVLink message from the STM.
+        // Pass it to our new helper function which will wrap it in a CRTP header and queue it for radio transmission.
+        esbSendSyslinkMavlinkPacket(&slRxPacket);
+        
         break;
       case SYSLINK_PM_ONOFF_SWITCHOFF:
         pmSetState(pmAllOff);
