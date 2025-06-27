@@ -75,12 +75,23 @@ static void mainloop(void);
 #define MEMORY_AIDECK_PID 0x12
 #define MEMORY_AIDECK_BOARDNAME "bcAI"
 #define DEBUG_PORT 0x0E // any unused CRTP port 0–15
+#define DEBUG_PORT_2 0x09 // Port for the second debug print
 
 #ifdef BLE
 int volatile bleEnabled = 1;
 #else
 int volatile bleEnabled = 0;
 #endif
+
+// New struct to store received packets to avoid race conditions
+typedef struct {
+  uint8_t size;
+  uint8_t data[63];
+  uint8_t rssi;
+  bool broadcast;
+} SafeRxPacket;
+
+static SafeRxPacket safePacket; // Define a static instance of our safe buffer
 
 static struct syslinkPacket slRxPacket;
 static struct syslinkPacket slTxPacket;
@@ -95,8 +106,8 @@ static void sendDataToStmOverSyslink();
 static void handleButtonEvents();
 static void handleSyslinkEvents(bool slReceived);
 
-static void handleRadioCmd(struct esbPacket_s * packet);
-static void handleBootloaderCmd(struct esbPacket_s *packet);
+static void handleRadioCmd(const SafeRxPacket* packet);
+static void handleBootloaderCmd(const SafeRxPacket* packet);
 static void disableBle();
 
 static bool debugProbeReceivedChan = false;
@@ -196,7 +207,6 @@ void mainloop()
 {
   //static EsbPacket esbRxPacket;
   //bool esbReceived = false;
-  static bool broadcast;
 
   while(1)
   {
@@ -212,53 +222,70 @@ void mainloop()
 
 if (esbIsRxPacket())
 {
+  // A packet is available in the radio's receive queue.
+  // We must immediately copy it to our safe, local buffer before the interrupt handler or radio DMA can overwrite it with an ACK packet.
+  // To prevent the RADIO_IRQHandler from corrupting our data during the copy, we disable all interrupts, perform the copy, and then immediately re-enable them. This makes the copy "atomic".
+  
+  __disable_irq(); // Disable all interrupts
+  
+  // Step 1: Get the packet from the radio's receive queue.
+  EsbPacket* packet = esbGetRxPacket();
+
+  // 2. Perform a deep copy into our safe buffer.
+  safePacket.size = packet->size;
+  if (safePacket.size > 0) {
+    memcpy(safePacket.data, packet->data, safePacket.size);
+  }
+  safePacket.rssi = packet->rssi;
+  safePacket.broadcast = (packet->match == ESB_MULTICAST_ADDRESS_MATCH);  // The received packet was a broadcast, if received on local address 1
+
+  // 3. Immediately release the radio's buffer. All subsequent logic will use the 'safePacket' object, not the volatile 'packet'.
+  esbReleaseRxPacket();
+
+  __enable_irq(); // Re-enable all interrupts
+
   // Only disable BLE once when the first ESB packet is received.
   if (!bleIsDisabled) {
     disableBle();
     bleIsDisabled = true;
   }
-  
-  // Step 1: Get the packet from the radio's receive queue.
-  EsbPacket* packet = esbGetRxPacket();
 
   // -- DEBUG --
   uint8_t dbg[3];
-  dbg[0] = packet->size;        // how many bytes the nRF saw
-  dbg[1] = packet->data[0];     // first byte
-  dbg[2] = packet->data[1];     // second byte
+  dbg[0] = safePacket.size;        // how many bytes the nRF saw
+  dbg[1] = safePacket.data[0];     // first byte
+  dbg[2] = safePacket.data[1];     // second byte
   // Queue a debug packet on DEBUG_PORT (0x0E), channel 0
   esbSendDebugPacket(DEBUG_PORT, 0, (char*)dbg, sizeof(dbg));
   // -- DEBUG --
 
   //Store RSSI here so that we can send it to STM later
   // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P
-  rssi = packet->rssi;
-
-  // The received packet was a broadcast, if received on local address 1
-  broadcast = packet->match == ESB_MULTICAST_ADDRESS_MATCH;
+  rssi = safePacket.rssi;
 
   // Now, inspect the packet and decide what to do with it.
   // Is it a special radio command packet?
-  if ((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
+  if ((safePacket.size >= 4) && (safePacket.data[0]&0xf3) == 0xf3 && (safePacket.data[1]==0x03))
   {
-    handleRadioCmd(packet);
+    // This logic needs to be updated to pass the safePacket
+    handleRadioCmd(&safePacket);
   }
   // Is it a special bootloader command packet?
-  else if ((packet->size > 2) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0xfe))
+  else if ((safePacket.size > 2) && (safePacket.data[0]&0xf3) == 0xf3 && (safePacket.data[1]==0xfe))
   {
-    handleBootloaderCmd(packet);
+    // This logic needs to be updated to pass the safePacket
+    handleBootloaderCmd(&safePacket);
   }
   // Is it a peer-to-peer (P2P) packet?
-  else if (packet->size >= 2 && (packet->data[0] & 0xf3) == 0xf3 && (packet->data[1] & 0xF0) == 0x80)
+  else if (safePacket.size >= 2 && (safePacket.data[0] & 0xf3) == 0xf3 && (safePacket.data[1] & 0xF0) == 0x80)
   {
     // Handle P2P logic (forward to STM with SYSLINK_RADIO_P2P type)
-    //esbRxPacket.rssi = packet->rssi;
 
-    slTxPacket.data[0] = packet->data[1] & 0x0F;  // The first byte sent is the P2P port
-    slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
-    memcpy(&slTxPacket.data[2], &packet->data[2], packet->size-2);
-    slTxPacket.length = packet->size;
-    if (broadcast) {
+    slTxPacket.data[0] = safePacket.data[1] & 0x0F;  // The first byte sent is the P2P port
+    slTxPacket.data[1] = safePacket.rssi; // Save RSSI between drones in packet
+    memcpy(&slTxPacket.data[2], &safePacket.data[2], safePacket.size - 2);
+    slTxPacket.length = safePacket.size;
+    if (safePacket.broadcast) {
       slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
     } else {
       slTxPacket.type = SYSLINK_RADIO_P2P;
@@ -269,21 +296,31 @@ if (esbIsRxPacket())
   // If it's none of the above, assume it's general data from the GCS.
   else
   {
-    slTxPacket.length = packet->size;
-    memcpy(slTxPacket.data, packet->data, packet->size);
+    // Set the Syslink payload length to the radio packet size
+    slTxPacket.length = safePacket.size;
 
-    if (broadcast) {
+    // Copy the radio packet's data into the Syslink packet
+    memcpy(slTxPacket.data, &safePacket.data, slTxPacket.length);
+
+    // Set the Syslink packet type.
+    if (safePacket.broadcast) {
       slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
     } else {
       // --- THIS IS NEW GCS->STM FORWARDING LOGIC ---
       slTxPacket.type = SYSLINK_RADIO_MAVLINK;
+      
+      // -- DEBUG --
+      uint8_t dbg2[3];
+      dbg2[0] = slTxPacket.length;      // how many bytes the nRF saw
+      dbg2[1] = slTxPacket.data[0];     // first byte
+      dbg2[2] = slTxPacket.data[1];     // second byte
+      // Queue a debug packet on DEBUG_PORT_2 (0x09), channel 0
+      esbSendDebugPacket(DEBUG_PORT_2, 0, (char*)dbg2, sizeof(dbg2));
+      // -- DEBUG --
     }
     // Use the buffered send for all transmissions
     syslinkSend_buffered(&slTxPacket);
   }
-
-  // After processing, release the radio buffer for the next packet.
-  esbReleaseRxPacket();
 }
 
 handleSyslinkEvents(syslinkReceive(&slRxPacket));
@@ -585,7 +622,7 @@ static void handleButtonEvents()
 #define RADIO_CTRL_SET_DATARATE 2
 #define RADIO_CTRL_SET_POWER 3
 
-static void handleRadioCmd(struct esbPacket_s *packet)
+static void handleRadioCmd(const SafeRxPacket *packet)
 {
   switch (packet->data[2]) {
     case RADIO_CTRL_SET_CHANNEL:
@@ -611,7 +648,7 @@ static void handleRadioCmd(struct esbPacket_s *packet)
 #define BOOTLOADER_CMD_LED_ON     0x05
 #define BOOTLOADER_CMD_LED_OFF    0x06
 
-static void handleBootloaderCmd(struct esbPacket_s *packet)
+static void handleBootloaderCmd(const SafeRxPacket *packet)
 {
   static bool resetInit = false;
   static struct esbPacket_s txpk;
