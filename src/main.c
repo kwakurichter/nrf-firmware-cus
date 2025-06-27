@@ -293,6 +293,18 @@ if (esbIsRxPacket())
 
     syslinkSend_buffered(&slTxPacket);
   }
+  else if ((safePacket.data[0] & 0xf3) == 0xf3)
+  {
+    // This is a low-level radio packet (like an ACK or handshake) that is not
+    // a command. We should do nothing and discard it, preventing it from
+    // being forwarded to the STM.
+  }
+  else if (safePacket.data[0] == 0xff)
+  {
+    // This is a low-level radio packet (like an ACK or handshake) that is not
+    // a command. We should do nothing and discard it, preventing it from
+    // being forwarded to the STM.
+  }
   // If it's none of the above, assume it's general data from the GCS.
   else
   {
