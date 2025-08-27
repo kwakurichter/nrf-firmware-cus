@@ -162,6 +162,11 @@ static void setupTx(bool retry, bool empty)
 #endif
   }
 
+  // Set the transmit address based on the packet's request
+  // This allows switching between Unicast (GCS) and Broadcast (P2P)
+  //EsbPacket* packet_to_send = (EsbPacket*)NRF_RADIO->PACKETPTR;
+  //NRF_RADIO->TXADDRESS = packet_to_send->txaddress;  
+  
   NRF_RADIO->TXADDRESS = 0x00UL;
 
   //After being disabled the radio will automatically send the ACK
@@ -454,6 +459,7 @@ EsbPacket * esbGetTxPacket()
 
   if (esbCanTxPacket()) {
     pk = &txPackets[txq_head];
+    // pk->txaddress = 0x00UL; // Default all outgoing packets to unicast
   }
 
   return pk;
@@ -484,6 +490,37 @@ void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
   rs = doTx;
 
 }
+
+//void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
+//{
+  // Check if there's space in the transmit queue.
+// if (!esbCanTxPacket())
+//  {
+    // Not enough space, drop the packet. This could be signaled back to STM
+    // in a more advanced implementation, but for now, we just drop it.
+//    return;
+//  }
+
+  // Get a pointer to the next available packet buffer in the queue.
+// EsbPacket* p2pPacket = esbGetTxPacket();
+//  if (!p2pPacket)
+//  {
+//    return;
+//  }  
+
+//  p2pPacket->size = length + 2;
+//  p2pPacket->ack = 0;
+//  p2pPacket->data[0] = 0xff;
+//  p2pPacket->data[1] = 0x80|(port&0x0f);
+
+//  memcpy(&p2pPacket->data[2], data, length);
+
+  // Set the TX address to Broadcast for this specific packet.
+//  p2pPacket->txaddress = 0x01UL;
+
+//  esbSendTxPacket();
+
+//}
 
 void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t length)
 {

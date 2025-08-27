@@ -486,6 +486,18 @@ static void handleSyslinkEvents(bool slReceived)
         if (bleEnabled) {
           disableBle();
         }
+
+        // --- STM->GCS DEBUG ---
+        //{ // Use braces to create a local scope for the debug variable
+        //  uint8_t dbg_stm[3];
+        //  dbg_stm[0] = slRxPacket.length;
+        //  dbg_stm[1] = slRxPacket.data[0];
+        //  dbg_stm[2] = slRxPacket.data[1];
+          // Use DEBUG_PORT_3 (0x0A) to make this print distinct
+        //  esbSendDebugPacket(DEBUG_PORT_3, 0, (char*)dbg_stm, sizeof(dbg_stm));
+        //}
+        // --- END OF DEBUG ---
+
         // Send the P2P packet immediately without buffer
         esbSendP2PPacket(slRxPacket.data[0],&slRxPacket.data[1],slRxPacket.length-1);
         break;

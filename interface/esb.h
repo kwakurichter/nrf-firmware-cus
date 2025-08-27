@@ -50,6 +50,7 @@ typedef struct esbPacket_s {
   uint8_t rssi;
   unsigned int crc;
   uint8_t match;
+  // uint8_t txaddress; // 0 for Unicast, 1 for Broadcast/P2P
 } EsbPacket;
 
 typedef enum esbDatarate_e { esbDatarate250K=0,
