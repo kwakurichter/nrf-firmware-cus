@@ -245,6 +245,21 @@ bool syslinkSend_buffered(struct syslinkPacket *packet)
   return true;
 }
 
+// For ArduPilot Implementation (uses the buffered UART send)
+bool syslinkMAVSend_buffered(uint8_t *buffer, uint16_t len)
+{
+  // This is part of the original logic to wait for the STM32 to talk first.
+  if (!isSyslinkActive)
+  {
+    return false;
+  }
+
+  // 6. Send the entire assembled frame in one non-blocking call
+  uart_buffered_send(buffer, len);
+
+  return true;
+}
+
 void syslinkDeactivateUntilPacketReceived()
 {
   isSyslinkActive = false;

@@ -234,6 +234,8 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-strict-aliasing
 CFLAGS += -fno-builtin --short-enums 
 # Disable checks of newer compilers that the SDK does not pass
 CFLAGS += -Wno-error=array-bounds
+# Disable the unaligned pointer warning that causes MAVLink to fail compilation
+CFLAGS += -Wno-error=address-of-packed-member
 
 # Enable app config
 CFLAGS += -DUSE_APP_CONFIG

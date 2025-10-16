@@ -52,6 +52,8 @@
 #include "ble_int.h"
 #include "ble_crazyflies.h"
 
+#include "mavlink/ardupilotmega/mavlink.h"  // For VBAT message
+
 extern void  initialise_monitor_handles(void);
 
 #ifndef SEMIHOSTING
@@ -77,6 +79,13 @@ static void mainloop(void);
 #define DEBUG_PORT 0x0E // any unused CRTP port 0–15
 #define DEBUG_PORT_2 0x09 // Port for the second debug print
 #define DEBUG_PORT_3 0x0A // Port for the third debug print
+#define MAV_PORT     0x09
+#define MAV_CHANNEL  0x00
+
+// Define a system and component ID for the NRF chip.
+// This identifies the NRF as the source of the MAVLink message.
+#define MAV_SYSTEM_ID_NRF 2
+#define MAV_COMP_ID_NRF_PMU 191 // MAV_COMP_ID_POWER_MANAGEMENT_UNIT
 
 #ifdef BLE
 int volatile bleEnabled = 1;
@@ -87,7 +96,7 @@ int volatile bleEnabled = 0;
 // New struct to store received packets to avoid race conditions
 typedef struct {
   uint8_t size;
-  uint8_t data[63];
+  uint8_t data[64];
   uint8_t rssi;
   bool broadcast;
 } SafeRxPacket;
@@ -96,8 +105,11 @@ static SafeRxPacket safePacket; // Define a static instance of our safe buffer
 
 static struct syslinkPacket slRxPacket;
 static struct syslinkPacket slTxPacket;
+static uint16_t syslink_message_id_counter = 0; // For Crazyflie Syslink Packet ID
 static int radioRSSISendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
 static int vbatSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
+static int vbatMAVSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
+static int heartbeatSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
 static uint8_t rssi;
 static bool bootedFromBootloader;
 static bool enableBatteryAutoupdate = false;
@@ -323,8 +335,12 @@ if (esbIsRxPacket())
       slTxPacket.type = SYSLINK_RADIO_MAVLINK;
       
       // -- DEBUG --
-      //uint8_t dbg2[3];
-      //dbg2[0] = slTxPacket.length;      // how many bytes the nRF saw
+      //uint8_t len = slTxPacket.length;
+      //uint8_t dbg2[len + 1];
+      //dbg2[0] = len;      // how many bytes the nRF saw  
+      //for (int i = 0; i < len; i++) {
+      //  dbg2[i + 1] = slTxPacket.data[i];
+      //}
       //dbg2[1] = slTxPacket.data[0];     // first byte
       //dbg2[2] = slTxPacket.data[1];     // second byte
       // Queue a debug packet on DEBUG_PORT_2 (0x09), channel 0
@@ -393,7 +409,6 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CHANNEL;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          //syslinkSend(&slTxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedChan = true;
@@ -407,7 +422,6 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_DATARATE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          //syslinkSend(&slTxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedRate = true;
@@ -420,7 +434,6 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CONTWAVE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          //syslinkSend(&slTxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
@@ -434,7 +447,6 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_ADDRESS;
           memcpy(slTxPacket.data, slRxPacket.data, 5);
           slTxPacket.length = 5;
-          //syslinkSend(&slTxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
 
           debugProbeReceivedAddress = true;
@@ -448,7 +460,6 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_POWER;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          //syslinkSend(&slTxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
@@ -477,7 +488,6 @@ static void handleSyslinkEvents(bool slReceived)
       case SYSLINK_OW_SCAN:
       case SYSLINK_OW_WRITE:
         if (memorySyslink(&slRxPacket)) {
-          //syslinkSend(&slRxPacket);
           syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
@@ -520,7 +530,6 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[len++] = '\0';
 
         slTxPacket.length = len;
-        //syslinkSend(&slTxPacket);
         syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
       } break;
       case SYSLINK_PM_BATTERY_AUTOUPDATE:
@@ -548,7 +557,6 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[7] = syslinkGetRxCheckSum2ErrorCnt();
 
         slTxPacket.length = 8;
-        //syslinkSend(&slTxPacket);
         syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
       }
         break;
@@ -561,9 +569,191 @@ static void syslinkEnableBatteryMessages()
   enableBatteryAutoupdate = true;
 }
 
+static bool syslink_MAVLink(const uint8_t *buffer, uint16_t len) 
+{
+  // Define the chunk size for fragmentation (64 [SYSLINK MTU] - 1 [CRTP HEADER] - 6 [MAVLINK HEADER])
+  static const int MAV_CHUNK = 57;
+
+  // Calculate how many fragments this MAVLink message will be split into
+  uint8_t total_syslink_fragments = (len + MAV_CHUNK - 1) / MAV_CHUNK;  
+
+  uint16_t syslink_fragmentation_full_id = syslink_message_id_counter++;
+  uint8_t offset = 0;  
+
+  while (offset < len)
+  {
+    uint8_t this_len = ((len - offset < MAV_CHUNK) ? (len - offset) : MAV_CHUNK);
+    uint8_t length_field = 7 + this_len; // 1B CRTP HEADER + 6B fragment header + data
+    uint8_t packet[SYSLINK_MTU + 7]; // Buffer for one fragment
+    uint8_t idx = 0;    
+
+    // 1) Syslink header
+    packet[idx++] = 0xBC;
+    packet[idx++] = 0xCF;
+    packet[idx++] = SYSLINK_SYS_MAVLINK;
+    packet[idx++] = length_field;    
+
+    // 1) CRTP Header
+    packet[idx++] = ((MAV_PORT & 0x0f) << 4 | 3 << 2 | (MAV_CHANNEL & 0x03));
+    
+    // 2) Fragment header
+    packet[idx++] = (uint8_t)(syslink_fragmentation_full_id & 0xFF);
+    packet[idx++] = (uint8_t)(syslink_fragmentation_full_id >> 8);
+    packet[idx++] = (uint8_t)(len & 0xFF);
+    packet[idx++] = (uint8_t)(len >> 8);
+    packet[idx++] = total_syslink_fragments;
+    packet[idx++] = (uint8_t)(offset / MAV_CHUNK);  
+    
+    // 3) Payload slice
+    if (this_len > 0) {
+      memcpy(&packet[idx], &buffer[offset], this_len);
+    }
+    
+    idx += this_len;
+
+    // 4) Fletcher-8 checksum
+    uint8_t c0=0, c1=0;
+    for (uint8_t j = 2; j < idx; j++) {
+        c0 += packet[j];
+        c1 += c0;
+    }
+    packet[idx++] = c0;
+    packet[idx++] = c1;    
+
+    // --- STM->GCS DEBUG ---
+    //{ // Use braces to create a local scope for the debug variable
+    //  uint8_t len = slTxPacket.length;
+    //  uint8_t dbg_stm[len];
+    //  dbg_stm[0] = len;      // how many bytes the nRF saw  
+    //  for (int i = 0; i < len; i++) {
+    //    dbg_stm[i + 1] = slTxPacket.data[i];
+    //  }      
+      // Use DEBUG_PORT_3 (0x0A)
+    //  esbSendDebugPacket(DEBUG_PORT_3, 0, (char*)dbg_stm, sizeof(dbg_stm));
+    //}
+    // --- END OF DEBUG ---    
+
+    // 5) Send the message over Syslink
+    syslinkMAVSend_buffered(packet, idx);
+
+    offset += this_len;    
+  }
+
+  return true;
+}
+
+static void syslinkMAVLinkHeartbeat()
+{
+  // Send the heartbeat to the STM at 1Hz
+  if ((systickGetTick() >= heartbeatSendTime + 1000)) {
+    heartbeatSendTime = systickGetTick();
+    
+    // The MAVLink message struct
+    mavlink_message_t msg;
+    // A buffer to hold the serialized message
+    uint8_t mavPacket[SYSLINK_MTU];
+    
+    // Step 1: Pack the HEARTBEAT message
+    // This tells QGC that a battery component is alive and on the network
+    mavlink_msg_heartbeat_pack(
+        MAV_SYSTEM_ID_NRF,              // System ID of the NRF
+        MAV_COMP_ID_NRF_PMU,            // Component ID of the NRF's PMU
+        &msg,                           // MAVLink message to pack into
+        MAV_TYPE_BATTERY,               // Identify this component as a battery
+        MAV_AUTOPILOT_INVALID,          // Not a full autopilot
+        0,                              // base_mode (not applicable)
+        0,                              // custom_mode (not applicable)
+        MAV_STATE_ACTIVE                // System status
+    );
+
+    // Step 2: Serialize the message into a byte buffer
+    uint16_t len = mavlink_msg_to_send_buffer(mavPacket, &msg);
+
+    // Step 3: Send the message over Syslink
+    syslink_MAVLink(mavPacket, len);
+  }
+}
+
+static void syslinkMAVLinkBatteryMessages()
+{
+  // Send the battery voltage and state to the STM AT 10Hz
+  if ((systickGetTick() >= vbatMAVSendTime + 1500)) {
+    float vdata; 
+    float tdata;
+    int is_charging = MAV_BATTERY_CHARGE_STATE_OK;
+
+    uint8_t flags = getPowerStatusFlags();
+
+    if (flags & 0x01) {   // Check if the 'isCharging' bit (the first bit) is set
+      is_charging = MAV_BATTERY_CHARGE_STATE_CHARGING;
+    }
+    
+    // The MAVLink message struct
+    mavlink_message_t msg;
+
+    // A buffer to hold the serialized message
+    uint8_t mavPacket[SYSLINK_MTU];
+    
+    vbatMAVSendTime = systickGetTick();
+
+    vdata = pmGetVBAT();
+    tdata = pmGetTemp();
+
+    // Convert temperature from degrees to centidegrees Celsius
+    int16_t temperature = (int16_t)(tdata * 100);
+
+    // Step 1: Prepare the voltage array as per the definition.
+    // The total voltage goes into the first element.
+    uint16_t voltages[10];
+    voltages[0] = (uint16_t)(vdata * 1000); // Overall voltage in mV
+
+    // Fill the rest of the cell voltages with UINT16_MAX as they are unknown.
+    for (int i = 1; i < 10; i++) {
+        voltages[i] = UINT16_MAX;
+    }
+
+    // This array is for cells 11-14. Zero indicates they are not supported.
+    uint16_t voltages_ext[4] = {0};
+
+    // Step 2: Pack the message using the function signature.
+    mavlink_msg_battery_status_pack(
+        MAV_SYSTEM_ID_NRF,                  // System ID
+        MAV_COMP_ID_NRF_PMU,                // Component ID
+        &msg,                               // MAVLink message to pack into
+        0,                                  // Battery ID
+        MAV_BATTERY_FUNCTION_ALL,           // Battery function
+        MAV_BATTERY_TYPE_LIPO,              // Type (chemistry)
+        temperature,                        // Temperature: INT16_MAX for unknown
+        voltages,                           // The voltages array
+        -1,                                 // Current: -1 for unknown
+        -1,                                 // Consumed charge: -1 for unknown
+        -1,                                 // Consumed energy: -1 for unknown
+        -1,                                 // Remaining percentage: -1 for unknown
+        0,                                  // Time remaining: 0 for unknown
+        is_charging,                        // Charge state
+        voltages_ext,                       // Extended voltages array (cells 11-14)
+        0,                                  // Mode: 0 for default/unsupported
+        0                                   // Fault bitmask
+    );
+
+    // Step 3: Serialize the message into a byte buffer
+    // This converts the C struct into a byte array that can be transmitted.
+    // The function returns the final length of the message.
+    uint16_t len = mavlink_msg_to_send_buffer(mavPacket, &msg);    
+
+    // Step 4: Send the message over Syslink
+    syslink_MAVLink(mavPacket, len);
+  }
+}
 
 static void sendDataToStmOverSyslink()
 {
+  // Call the heartbeat function
+  syslinkMAVLinkHeartbeat();
+  
+  // battery message function
+  syslinkMAVLinkBatteryMessages();
+  
   if (enableBatteryAutoupdate)
   {
     // Send the battery voltage and state to the STM every SYSLINK_SEND_PERIOD_MS
