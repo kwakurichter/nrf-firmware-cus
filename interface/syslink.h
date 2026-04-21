@@ -55,6 +55,22 @@ bool syslinkReceive(struct syslinkPacket *packet);
 bool syslinkSend(struct syslinkPacket *packet);
 
 /**
+ * Send syslink packet that uses the new buffered UART send.
+ * For ArduPilot Implementation.
+ *
+ * @param packet  Syslink packet containing data to send.
+ */
+bool syslinkSend_buffered(struct syslinkPacket *packet);
+
+/**
+ * Send syslink packet that uses the new buffered UART send.
+ * For ArduPilot Implementation.
+ *
+ * @param packet  Syslink packet containing data to send.
+ */
+bool syslinkMAVSend_buffered(uint8_t *buffer, uint16_t len);
+
+/**
  * Reset syslink state machine.
  */
 void syslinkReset();
@@ -93,6 +109,7 @@ uint8_t syslinkGetRxCheckSum2ErrorCnt();
 #define SYSLINK_RADIO_P2P_ACK       0x09
 #define SYSLINK_RADIO_P2P_BROADCAST 0x0A
 #define SYSLINK_RADIO_READY         0x0B
+#define SYSLINK_RADIO_MAVLINK       0x0C // For ArduPilot Implementation
 
 
 #define SYSLINK_PM_SOURCE             0x10
@@ -113,6 +130,7 @@ uint8_t syslinkGetRxCheckSum2ErrorCnt();
 #define SYSLINK_OW_WRITE      0x23
 
 #define SYSLINK_SYS_NRF_VERSION 0x30
+#define SYSLINK_SYS_MAVLINK     0x31  // For ArduPilot Implementation
 
 #define SYSLINK_DEBUG_PROBE 0xF0
 

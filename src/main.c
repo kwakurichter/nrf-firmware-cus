@@ -52,6 +52,8 @@
 #include "ble_int.h"
 #include "ble_crazyflies.h"
 
+#include "mavlink/ardupilotmega/mavlink.h"  // For VBAT message
+
 extern void  initialise_monitor_handles(void);
 
 #ifndef SEMIHOSTING
@@ -74,6 +76,15 @@ static void mainloop(void);
 #define MEMORY_BITCRAZE_VID 0xBC
 #define MEMORY_AIDECK_PID 0x12
 #define MEMORY_AIDECK_BOARDNAME "bcAI"
+#define DEBUG_PORT   0x0E // any unused CRTP port 0–15
+#define DEBUG_PORT_2 0x09 // Port for the second debug print
+#define DEBUG_PORT_3 0x0A // Port for the third debug print
+#define MAV_PORT     0x09
+#define MAV_CHANNEL  0x00
+
+// Define a system and component ID for the NRF chip.
+#define MAV_SYSTEM_ID_NRF    2
+#define MAV_COMP_ID_NRF_PMU  191 // MAV_COMP_ID_POWER_MANAGEMENT_UNIT
 
 #ifdef BLE
 int volatile bleEnabled = 1;
@@ -81,10 +92,23 @@ int volatile bleEnabled = 1;
 int volatile bleEnabled = 0;
 #endif
 
+// New struct to store received packets to avoid race conditions
+typedef struct {
+  uint8_t size;
+  uint8_t data[64];
+  uint8_t rssi;
+  bool broadcast;
+} SafeRxPacket;
+
+static SafeRxPacket safePacket;
+
 static struct syslinkPacket slRxPacket;
 static struct syslinkPacket slTxPacket;
+static uint16_t syslink_message_id_counter = 0;
 static int radioRSSISendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
 static int vbatSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
+static int vbatMAVSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
+static int heartbeatSendTime = SYSLINK_STARTUP_DELAY_TIME_MS;
 static uint8_t rssi;
 static bool bootedFromBootloader;
 static bool enableBatteryAutoupdate = false;
@@ -94,13 +118,14 @@ static void sendDataToStmOverSyslink();
 static void handleButtonEvents();
 static void handleSyslinkEvents(bool slReceived);
 
-static void handleRadioCmd(struct esbPacket_s * packet);
-static void handleBootloaderCmd(struct esbPacket_s *packet);
+static void handleRadioCmd(const SafeRxPacket *packet);
+static void handleBootloaderCmd(const SafeRxPacket *packet);
 static void disableBle();
 
 static bool debugProbeReceivedChan = false;
 static bool debugProbeReceivedAddress = false;
 static bool debugProbeReceivedRate = false;
+static bool bleIsDisabled = false;
 
 static bool radioReadyCommandReceived = false;
 static uint32_t sysonTime = 0;
@@ -195,11 +220,6 @@ int main()
 
 void mainloop()
 {
-  static EsbPacket esbRxPacket;
-  bool esbReceived = false;
-  static bool broadcast;
-  static bool p2p;
-
   // Radio startup gate - wait for syslink command or timeout
   static bool radioStartupGateHandled = false;
   static uint32_t startupTime = 0;
@@ -212,87 +232,88 @@ void mainloop()
         startupTime = systickGetTick();
       }
 
-      // Check if we should open the gate
-      if (radioReadyCommandReceived || 
+      if (radioReadyCommandReceived ||
            (systickGetTick() >= startupTime + SYSLINK_RADIO_DISABLED_TIMEOUT_MS)) {
         esbAllowStart();
         radioStartupGateHandled = true;
       }
     }
-#ifdef BLE
-    if (bleEnabled) {
-      if ((esbReceived == false) && ble_receive_packet(&esbRxPacket)) {
-        esbReceived = true;
-      }
-    }
-#endif
 
 #ifndef CONT_WAVE_TEST
 
-    if ((esbReceived == false) && esbIsRxPacket())
+    if (esbIsRxPacket())
     {
+      // Atomically copy the received packet to our safe local buffer before the
+      // interrupt handler or radio DMA can overwrite it with an ACK packet.
+      __disable_irq();
+
       EsbPacket* packet = esbGetRxPacket();
-      //Store RSSI here so that we can send it to STM later
-      // Todo investigate if we can not just simply link this to the packet itself or find a way to separate this due to P2P
-      rssi = packet->rssi;
-      // The received packet was a broadcast, if received on local address 1
-      broadcast = packet->match == ESB_MULTICAST_ADDRESS_MATCH;
-      // If the packet is a null packet with data[1] == 0x8*, it is a P2P packet
-      if (packet->size >= 2 && (packet->data[0] & 0xf3) == 0xf3 && (packet->data[1] & 0xF0) == 0x80) {
-        p2p = true;
-        esbRxPacket.rssi = packet->rssi;
-      } else {
-        p2p = false;
+
+      safePacket.size = packet->size;
+      if (safePacket.size > 0) {
+        memcpy(safePacket.data, packet->data, safePacket.size);
       }
-      memcpy(esbRxPacket.data, packet->data, packet->size);
-      esbRxPacket.size = packet->size;
-      esbReceived = true;
-      esbReleaseRxPacket(packet);
+      safePacket.rssi = packet->rssi;
+      safePacket.broadcast = (packet->match == ESB_MULTICAST_ADDRESS_MATCH);
 
-      disableBle();
-    }
+      esbReleaseRxPacket();
 
-    if (esbReceived)
-    {
-      EsbPacket* packet = &esbRxPacket;
-      esbReceived = false;
+      __enable_irq();
 
-      if((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
-      {
-        handleRadioCmd(packet);
+      // Only disable BLE once when the first ESB packet is received.
+      if (!bleIsDisabled) {
+        disableBle();
+        bleIsDisabled = true;
       }
-      else if ((packet->size >2) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0xfe))
+
+      rssi = safePacket.rssi;
+
+      if ((safePacket.size >= 4) && (safePacket.data[0]&0xf3) == 0xf3 && (safePacket.data[1]==0x03))
       {
-        handleBootloaderCmd(packet);
+        handleRadioCmd(&safePacket);
+      }
+      else if ((safePacket.size > 2) && (safePacket.data[0]&0xf3) == 0xf3 && (safePacket.data[1]==0xfe))
+      {
+        handleBootloaderCmd(&safePacket);
+      }
+      else if (safePacket.size >= 2 && (safePacket.data[0] & 0xf3) == 0xf3 && (safePacket.data[1] & 0xF0) == 0x80)
+      {
+        // P2P packet — forward to STM
+        slTxPacket.data[0] = safePacket.data[1] & 0x0F;  // P2P port
+        slTxPacket.data[1] = safePacket.rssi;
+        memcpy(&slTxPacket.data[2], &safePacket.data[2], safePacket.size - 2);
+        slTxPacket.length = safePacket.size;
+        if (safePacket.broadcast) {
+          slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
+        } else {
+          slTxPacket.type = SYSLINK_RADIO_P2P;
+        }
+        handleSyslinkEvents(syslinkReceive(&slRxPacket));
+        sendDataToStmOverSyslink();
+        syslinkSend_buffered(&slTxPacket);
+      }
+      else if ((safePacket.data[0] & 0xf3) == 0xf3)
+      {
+        // Low-level radio packet (not a command) — discard
+      }
+      else if (safePacket.data[0] == 0xff)
+      {
+        // Low-level radio packet (not a command) — discard
       }
       else
       {
-        // Radio packet, send it to STM32 over syslink.
-        // Do it first when the STM is ready to receive it.
-        if  (radioReadyCommandReceived || 
-              (systickGetTick() >= sysonTime + SYSLINK_RADIO_DISABLED_TIMEOUT_MS))
+        // General data from GCS — forward to STM
+        if (radioReadyCommandReceived ||
+            (systickGetTick() >= sysonTime + SYSLINK_RADIO_DISABLED_TIMEOUT_MS))
         {
-          if (p2p == false) {
-            memcpy(slTxPacket.data, packet->data, packet->size);
-            slTxPacket.length = packet->size;
-            if (broadcast) {
-              slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
-            } else {
-              slTxPacket.type = SYSLINK_RADIO_RAW;
-            }
+          slTxPacket.length = safePacket.size;
+          memcpy(slTxPacket.data, safePacket.data, slTxPacket.length);
+          if (safePacket.broadcast) {
+            slTxPacket.type = SYSLINK_RADIO_RAW_BROADCAST;
           } else {
-            // The first byte sent is the P2P port
-            slTxPacket.data[0] = packet->data[1] & 0x0F;
-            slTxPacket.data[1] = packet->rssi; // Save RSSI between drones in packet
-            memcpy(&slTxPacket.data[2], &packet->data[2], packet->size-2);
-            slTxPacket.length = packet->size;
-            if (broadcast) {
-              slTxPacket.type = SYSLINK_RADIO_P2P_BROADCAST;
-            } else {
-              slTxPacket.type = SYSLINK_RADIO_P2P;
-            }
+            slTxPacket.type = SYSLINK_RADIO_MAVLINK;
           }
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
         }
       }
     }
@@ -354,7 +375,7 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CHANNEL;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
 
           debugProbeReceivedChan = true;
         }
@@ -367,7 +388,7 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_DATARATE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
 
           debugProbeReceivedRate = true;
         }
@@ -379,7 +400,7 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_CONTWAVE;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
         }
         break;
       case SYSLINK_RADIO_ADDRESS:
@@ -392,7 +413,7 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_ADDRESS;
           memcpy(slTxPacket.data, slRxPacket.data, 5);
           slTxPacket.length = 5;
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
 
           debugProbeReceivedAddress = true;
         }
@@ -405,8 +426,12 @@ static void handleSyslinkEvents(bool slReceived)
           slTxPacket.type = SYSLINK_RADIO_POWER;
           slTxPacket.data[0] = slRxPacket.data[0];
           slTxPacket.length = 1;
-          syslinkSend(&slTxPacket);
+          syslinkSend_buffered(&slTxPacket);
         }
+        break;
+      case SYSLINK_RADIO_MAVLINK:
+        // STM->GCS: wrap MAVLink payload in CRTP header and queue for radio TX
+        esbSendSyslinkMavlinkPacket(&slRxPacket);
         break;
       case SYSLINK_PM_ONOFF_SWITCHOFF:
         pmSetState(pmAllOff);
@@ -419,7 +444,7 @@ static void handleSyslinkEvents(bool slReceived)
       case SYSLINK_OW_SCAN:
       case SYSLINK_OW_WRITE:
         if (memorySyslink(&slRxPacket)) {
-          syslinkSend(&slRxPacket);
+          syslinkSend_buffered(&slTxPacket);  // to avoid weird interactions between buffered send and non-buffered send
         }
         break;
       case SYSLINK_RADIO_P2P_BROADCAST:
@@ -449,7 +474,7 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[len++] = '\0';
 
         slTxPacket.length = len;
-        syslinkSend(&slTxPacket);
+        syslinkSend_buffered(&slTxPacket);
       } break;
       case SYSLINK_PM_BATTERY_AUTOUPDATE:
         syslinkEnableBatteryMessages();
@@ -468,7 +493,7 @@ static void handleSyslinkEvents(bool slReceived)
         // Send ACK back to STM32
         slTxPacket.type = SYSLINK_RADIO_READY;
         slTxPacket.length = 0;
-        syslinkSend(&slTxPacket);
+        syslinkSend_buffered(&slTxPacket);
         break;
       case SYSLINK_PM_DECKCTRL_DFU:
         pmDeckctrlDfu(slRxPacket.data[0]);
@@ -486,7 +511,7 @@ static void handleSyslinkEvents(bool slReceived)
         slTxPacket.data[7] = syslinkGetRxCheckSum2ErrorCnt();
 
         slTxPacket.length = 8;
-        syslinkSend(&slTxPacket);
+        syslinkSend_buffered(&slTxPacket);
       }
         break;
     }
@@ -498,9 +523,149 @@ static void syslinkEnableBatteryMessages()
   enableBatteryAutoupdate = true;
 }
 
+static bool syslink_MAVLink(const uint8_t *buffer, uint16_t len)
+{
+  static const int MAV_CHUNK = 57;
+
+  uint8_t total_syslink_fragments = (len + MAV_CHUNK - 1) / MAV_CHUNK;
+
+  uint16_t syslink_fragmentation_full_id = syslink_message_id_counter++;
+  uint8_t offset = 0;
+
+  while (offset < len)
+  {
+    uint8_t this_len = ((len - offset < MAV_CHUNK) ? (len - offset) : MAV_CHUNK);
+    uint8_t length_field = 7 + this_len; // 1B CRTP HEADER + 6B fragment header + data
+    uint8_t packet[SYSLINK_MTU + 7];
+    uint8_t idx = 0;
+
+    // 1) Syslink header
+    packet[idx++] = 0xBC;
+    packet[idx++] = 0xCF;
+    packet[idx++] = SYSLINK_SYS_MAVLINK;
+    packet[idx++] = length_field;
+
+    // 2) CRTP Header
+    packet[idx++] = ((MAV_PORT & 0x0f) << 4 | 3 << 2 | (MAV_CHANNEL & 0x03));
+
+    // 3) Fragment header
+    packet[idx++] = (uint8_t)(syslink_fragmentation_full_id & 0xFF);
+    packet[idx++] = (uint8_t)(syslink_fragmentation_full_id >> 8);
+    packet[idx++] = (uint8_t)(len & 0xFF);
+    packet[idx++] = (uint8_t)(len >> 8);
+    packet[idx++] = total_syslink_fragments;
+    packet[idx++] = (uint8_t)(offset / MAV_CHUNK);
+
+    // 4) Payload slice
+    if (this_len > 0) {
+      memcpy(&packet[idx], &buffer[offset], this_len);
+    }
+    idx += this_len;
+
+    // 5) Fletcher-8 checksum
+    uint8_t c0=0, c1=0;
+    for (uint8_t j = 2; j < idx; j++) {
+        c0 += packet[j];
+        c1 += c0;
+    }
+    packet[idx++] = c0;
+    packet[idx++] = c1;
+
+    syslinkMAVSend_buffered(packet, idx);
+
+    offset += this_len;
+  }
+
+  return true;
+}
+
+static void syslinkMAVLinkHeartbeat()
+{
+  if ((systickGetTick() >= heartbeatSendTime + 1000)) {
+    heartbeatSendTime = systickGetTick();
+
+    mavlink_message_t msg;
+    uint8_t mavPacket[SYSLINK_MTU];
+
+    mavlink_msg_heartbeat_pack(
+        MAV_SYSTEM_ID_NRF,
+        MAV_COMP_ID_NRF_PMU,
+        &msg,
+        MAV_TYPE_BATTERY,
+        MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        MAV_STATE_ACTIVE
+    );
+
+    uint16_t len = mavlink_msg_to_send_buffer(mavPacket, &msg);
+    syslink_MAVLink(mavPacket, len);
+  }
+}
+
+static void syslinkMAVLinkBatteryMessages()
+{
+  if ((systickGetTick() >= vbatMAVSendTime + 1500)) {
+    float vdata;
+    float tdata;
+    int is_charging = MAV_BATTERY_CHARGE_STATE_OK;
+
+    uint8_t flags = getPowerStatusFlags();
+
+    if (flags & 0x01) {
+      is_charging = MAV_BATTERY_CHARGE_STATE_CHARGING;
+    }
+
+    mavlink_message_t msg;
+    uint8_t mavPacket[SYSLINK_MTU];
+
+    vbatMAVSendTime = systickGetTick();
+
+    vdata = pmGetVBAT();
+    tdata = pmGetTemp();
+
+    int16_t temperature = (int16_t)(tdata * 100);
+
+    uint16_t voltages[10];
+    voltages[0] = (uint16_t)(vdata * 1000);
+    for (int i = 1; i < 10; i++) {
+        voltages[i] = UINT16_MAX;
+    }
+    uint16_t voltages_ext[4] = {0};
+
+    mavlink_msg_battery_status_pack(
+        MAV_SYSTEM_ID_NRF,
+        MAV_COMP_ID_NRF_PMU,
+        &msg,
+        0,
+        MAV_BATTERY_FUNCTION_ALL,
+        MAV_BATTERY_TYPE_LIPO,
+        temperature,
+        voltages,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        is_charging,
+        voltages_ext,
+        0,
+        0
+    );
+
+    uint16_t len = mavlink_msg_to_send_buffer(mavPacket, &msg);
+    syslink_MAVLink(mavPacket, len);
+  }
+}
 
 static void sendDataToStmOverSyslink()
 {
+  // Call the heartbeat function
+  syslinkMAVLinkHeartbeat();
+
+  // battery message function
+  syslinkMAVLinkBatteryMessages();
+
   if (enableBatteryAutoupdate)
   {
     // Send the battery voltage and state to the STM every SYSLINK_SEND_PERIOD_MS
@@ -527,7 +692,7 @@ static void sendDataToStmOverSyslink()
       slTxPacket.length += 4;
       memcpy(slTxPacket.data + 1 + 8, &fdata, sizeof(float));
     #endif
-      syslinkSend(&slTxPacket);
+      syslinkSend_buffered(&slTxPacket);
     }
 
     //Send an RSSI sample to the STM every 10ms(100Hz)
@@ -540,7 +705,7 @@ static void sendDataToStmOverSyslink()
       slTxPacket.length = sizeof(uint8_t);
       memcpy(slTxPacket.data, &rssi, sizeof(uint8_t));
 
-      syslinkSend(&slTxPacket);
+      syslinkSend_buffered(&slTxPacket);
     }
   }
 }
@@ -579,7 +744,7 @@ static void handleButtonEvents()
 #define RADIO_CTRL_SET_DATARATE 2
 #define RADIO_CTRL_SET_POWER 3
 
-static void handleRadioCmd(struct esbPacket_s *packet)
+static void handleRadioCmd(const SafeRxPacket *packet)
 {
   switch (packet->data[2]) {
     case RADIO_CTRL_SET_CHANNEL:
@@ -605,7 +770,7 @@ static void handleRadioCmd(struct esbPacket_s *packet)
 #define BOOTLOADER_CMD_LED_ON     0x05
 #define BOOTLOADER_CMD_LED_OFF    0x06
 
-static void handleBootloaderCmd(struct esbPacket_s *packet)
+static void handleBootloaderCmd(const SafeRxPacket *packet)
 {
   static bool resetInit = false;
   static struct esbPacket_s txpk;

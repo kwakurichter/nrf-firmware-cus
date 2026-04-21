@@ -1,0 +1,70 @@
+@@ -197,6 +197,69 @@ bool syslinkSend(struct syslinkPacket *packet)
+  }
+}
+
+// For ArduPilot Implementation (uses the buffered UART send)
+bool syslinkSend_buffered(struct syslinkPacket *packet)
+{
+  // This is part of the original logic to wait for the STM32 to talk first.
+  if (!isSyslinkActive)
+  {
+    return false;
+  }
+
+  // 1. Create a temporary buffer to hold the entire packet frame.
+  //    Size = 2 (START) + 1 (TYPE) + 1 (LEN) + max_data + 2 (CKSUM)
+  uint8_t frame_buffer[SYSLINK_MTU + 6];
+  uint16_t frame_len = 0;
+
+  // 2. Initialize checksum variables
+  uint8_t cksum_a=0;
+  uint8_t cksum_b=0;
+
+  // 3. Assemble the packet header
+  frame_buffer[frame_len++] = START_BYTE1;
+  frame_buffer[frame_len++] = START_BYTE2;
+
+  frame_buffer[frame_len++] = packet->type;
+  cksum_a += packet->type;
+  cksum_b += cksum_a;
+
+  frame_buffer[frame_len++] = packet->length;
+  cksum_a += packet->length;
+  cksum_b += cksum_a;
+
+  // 4. Copy the data payload and update checksum on-the-fly
+  for (int i = 0; i < packet->length; i++)
+  {
+    frame_buffer[frame_len++] = packet->data[i];
+    cksum_a += packet->data[i];
+    cksum_b += cksum_a;
+  }
+
+  // 5. Add the calculated checksum to the end of the frame
+  frame_buffer[frame_len++] = cksum_a;
+  frame_buffer[frame_len++] = cksum_b;
+
+  // 6. Send the entire assembled frame in one non-blocking call
+  uart_buffered_send(frame_buffer, frame_len);
+
+  return true;
+}
+
+// For ArduPilot Implementation (uses the buffered UART send)
+bool syslinkMAVSend_buffered(uint8_t *buffer, uint16_t len)
+{
+  // This is part of the original logic to wait for the STM32 to talk first.
+  if (!isSyslinkActive)
+  {
+    return false;
+  }
+
+  // 6. Send the entire assembled frame in one non-blocking call
+  uart_buffered_send(buffer, len);
+
+  return true;
+}
+
+void syslinkDeactivateUntilPacketReceived()
+{
+  isSyslinkActive = false;

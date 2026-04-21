@@ -165,6 +165,11 @@ static void setupTx(bool retry, bool empty)
 #endif
   }
 
+  // Set the transmit address based on the packet's request
+  // This allows switching between Unicast (GCS) and Broadcast (P2P)
+  //EsbPacket* packet_to_send = (EsbPacket*)NRF_RADIO->PACKETPTR;
+  //NRF_RADIO->TXADDRESS = packet_to_send->txaddress;
+
   NRF_RADIO->TXADDRESS = 0x00UL;
 
   //After being disabled the radio will automatically send the ACK
@@ -460,6 +465,7 @@ EsbPacket * esbGetTxPacket()
 
   if (esbCanTxPacket()) {
     pk = &txPackets[txq_head];
+    // pk->txaddress = 0x00UL; // Default all outgoing packets to unicast
   }
 
   return pk;
@@ -491,6 +497,66 @@ void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
 
 }
 
+
+void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t length)
+{
+  if (!esbCanTxPacket())
+  {
+    return;
+  }
+
+  EsbPacket* packet = esbGetTxPacket();
+  if (!packet)
+  {
+    return;
+  }
+
+  if (length > 29)
+  {
+    length = 29;
+  }
+
+  // Format: [ 4-bit Port | 2-bit Reserved (must be 11) | 2-bit Channel ]
+  uint8_t crtp_header = ((port & 0x0F) << 4) | (0x03 << 2) | (channel & 0x03);
+  packet->data[0] = crtp_header;
+
+  memcpy(&packet->data[1], data, length);
+
+  packet->size = length + 1;
+
+  esbSendTxPacket();
+}
+
+void esbSendSyslinkMavlinkPacket(const struct syslinkPacket *slPacket)
+{
+  if (!esbCanTxPacket())
+  {
+    return;
+  }
+
+  EsbPacket* packet = esbGetTxPacket();
+  if (!packet)
+  {
+    return;
+  }
+
+  const uint8_t MAVLINK_PORT = 0x0B;
+  const uint8_t MAVLINK_CHANNEL = 0;
+
+  uint8_t payload_len = slPacket->length;
+  if (payload_len > 30) {
+    payload_len = 30;
+  }
+
+  uint8_t crtp_header = ((MAVLINK_PORT & 0x0F) << 4) | (0x03 << 2) | (MAVLINK_CHANNEL & 0x03);
+  packet->data[0] = crtp_header;
+
+  memcpy(&packet->data[1], slPacket->data, payload_len);
+
+  packet->size = payload_len + 1;
+
+  esbSendTxPacket();
+}
 
 void esbSetDatarate(EsbDatarate dr)
 {

@@ -197,6 +197,59 @@ bool syslinkSend(struct syslinkPacket *packet)
   }
 }
 
+// For ArduPilot Implementation (uses the buffered UART send)
+bool syslinkSend_buffered(struct syslinkPacket *packet)
+{
+  if (!isSyslinkActive)
+  {
+    return false;
+  }
+
+  uint8_t frame_buffer[SYSLINK_MTU + 6];
+  uint16_t frame_len = 0;
+
+  uint8_t cksum_a=0;
+  uint8_t cksum_b=0;
+
+  frame_buffer[frame_len++] = START_BYTE1;
+  frame_buffer[frame_len++] = START_BYTE2;
+
+  frame_buffer[frame_len++] = packet->type;
+  cksum_a += packet->type;
+  cksum_b += cksum_a;
+
+  frame_buffer[frame_len++] = packet->length;
+  cksum_a += packet->length;
+  cksum_b += cksum_a;
+
+  for (int i = 0; i < packet->length; i++)
+  {
+    frame_buffer[frame_len++] = packet->data[i];
+    cksum_a += packet->data[i];
+    cksum_b += cksum_a;
+  }
+
+  frame_buffer[frame_len++] = cksum_a;
+  frame_buffer[frame_len++] = cksum_b;
+
+  uart_buffered_send(frame_buffer, frame_len);
+
+  return true;
+}
+
+// For ArduPilot Implementation (uses the buffered UART send)
+bool syslinkMAVSend_buffered(uint8_t *buffer, uint16_t len)
+{
+  if (!isSyslinkActive)
+  {
+    return false;
+  }
+
+  uart_buffered_send(buffer, len);
+
+  return true;
+}
+
 void syslinkDeactivateUntilPacketReceived()
 {
   isSyslinkActive = false;

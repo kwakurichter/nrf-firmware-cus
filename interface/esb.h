@@ -28,6 +28,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "syslink.h"
 
 /* ESB Radio packet */
 typedef struct esbPacket_s {
@@ -88,6 +89,12 @@ EsbPacket * esbGetTxPacket();
 
 /* Immediately send a peer 2 peer packet in TX */
 void esbSendP2PPacket(uint8_t port, char *data, uint8_t length);
+
+/* Queues a CRTP-formatted debug packet for sending to the GCS */
+void esbSendDebugPacket(uint8_t port, uint8_t channel, char *data, uint8_t length);
+
+/* Queues a Syslink payload as a CRTP MAVLink packet for sending to the GCS */
+void esbSendSyslinkMavlinkPacket(const struct syslinkPacket *slPacket);
 
 /* Release and set for sending the buffer returned by getTxPacket */
 void esbSendTxPacket();
