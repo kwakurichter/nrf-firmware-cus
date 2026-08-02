@@ -501,6 +501,28 @@ void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
 
 }
 
+void esbSendBroadcast(uint8_t header, const uint8_t *data, uint8_t length)
+{
+  if (length > ESB_MAX_PAYLOAD - 1) {
+    length = ESB_MAX_PAYLOAD - 1;
+  }
+
+  p2pPacket.size = length + 1;
+  p2pPacket.ack = 0;
+  p2pPacket.data[0] = header;
+
+  memcpy(&p2pPacket.data[1], data, length);
+
+  NRF_RADIO->PACKETPTR = (uint32_t)&p2pPacket;
+  // Address 1 is the shared broadcast address, which is not acked
+  NRF_RADIO->TXADDRESS = 0x01UL;
+  NRF_RADIO->SHORTS &= ~RADIO_SHORTS_DISABLED_RXEN_Msk;
+  NRF_RADIO->SHORTS |= RADIO_SHORTS_DISABLED_TXEN_Msk;
+  NRF_RADIO->TASKS_DISABLE = 1UL; // Disabling triggers the transmission
+
+  rs = doTx;
+}
+
 
 void esbSetDatarate(EsbDatarate dr)
 {

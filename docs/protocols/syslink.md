@@ -216,6 +216,50 @@ communication. The NRF51 responds with the same packet type as an
 acknowledgment. On boot the NRF51 delays enabling radio reception until
 either this command is received or a 3 second timeout expires.
 
+### SYSLINK\_RADIO\_MAVLINK
+
+-   **Type**: 0x0C
+-   **Data format**: Opaque chunk of the MAVLink byte stream, 1 to 251
+    bytes.
+
+Carries MAVLink in both directions. The NRF51 does not parse the
+contents: one syslink packet becomes exactly one radio packet, and one
+radio packet becomes exactly one syslink packet.
+
+The 251 byte ceiling is the 252 byte ESB payload less the one byte
+on-air marker that distinguishes MAVLink traffic from the CRTP-derived
+control packets the NRF51 still answers locally. A longer chunk is
+dropped rather than truncated, since silently losing the tail would
+corrupt a frame in a way the receiver could not detect.
+
+There is no reassembly anywhere in the NRF51. None is needed: the far
+end feeds a byte-stream parser that resyncs on STX, so a lost chunk
+costs one frame. Note that a MAVLink v2 frame can reach 267 bytes
+unsigned (280 signed), which does not fit in one radio packet — the
+sender should split those, accepting that losing either half costs the
+frame. Sending one whole frame per packet where possible keeps a single
+lost packet from damaging two frames.
+
+### SYSLINK\_RADIO\_MAVLINK\_MODE
+
+-   **Type**: 0x0D
+-   **Data format**: 1 byte
+
+Selects how MAVLink chunks are transmitted. Takes effect on the next
+transmission; the default is telemetry.
+
+| Value | Mode      | Behaviour                                                     |
+| ----- | --------- | ------------------------------------------------------------- |
+| 0     | Telemetry | Unicast to the ground station, with ESB hardware ack and retry |
+| 1     | P2P       | Broadcast to peers on the shared address, unacked              |
+
+In telemetry mode the Crazyflie is a PRX, so downlink chunks are queued
+and leave in ack payloads only when the ground station polls — the same
+way CRTP downlink works. A send can therefore fail when the queue is
+full. In P2P mode chunks are broadcast immediately and unacked, which is
+the correct semantic for peer-to-peer since there is no single receiver
+to acknowledge them.
+
 Power management packets
 ------------------------
 

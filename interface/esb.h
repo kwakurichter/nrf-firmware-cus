@@ -101,6 +101,14 @@ EsbPacket * esbGetTxPacket();
 /* Immediately send a peer 2 peer packet in TX */
 void esbSendP2PPacket(uint8_t port, char *data, uint8_t length);
 
+/* Immediately broadcast a packet on the shared address, unacked and without
+ * CRTP framing. header is prepended to data, so callers can add their own
+ * protocol byte without needing a staging buffer.
+ *
+ * Like esbSendP2PPacket this hijacks the radio mid-cycle rather than going
+ * through the TX queue, so it can cut short an in-flight receive. */
+void esbSendBroadcast(uint8_t header, const uint8_t *data, uint8_t length);
+
 /* Release and set for sending the buffer returned by getTxPacket */
 void esbSendTxPacket();
 

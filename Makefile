@@ -73,6 +73,7 @@ SRC_FILES += $(PROJ_DIR)/ow/crcutil.c
 SRC_FILES += $(PROJ_DIR)/pm.c
 SRC_FILES += $(PROJ_DIR)/syslink.c
 SRC_FILES += $(PROJ_DIR)/esb.c
+SRC_FILES += $(PROJ_DIR)/mavlink_transport.c
 SRC_FILES += $(PROJ_DIR)/main.c
 SRC_FILES += $(PROJ_DIR)/uart.c
 SRC_FILES += $(PROJ_DIR)/button.c

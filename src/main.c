@@ -33,6 +33,7 @@
 
 #include "uart.h"
 #include "esb.h"
+#include "mavlink_transport.h"
 #include "syslink.h"
 #include "led.h"
 #include "button.h"
@@ -224,7 +225,24 @@ void mainloop()
       EsbPacket* packet = &esbRxPacket;
       esbReceived = false;
 
-      if((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
+      const uint8_t *mavlinkPayload;
+      uint8_t mavlinkPayloadLength;
+
+      if (mavlinkTransportReceive(packet, &mavlinkPayload, &mavlinkPayloadLength))
+      {
+        // Forward the chunk to the STM32 verbatim. Checked against the same
+        // readiness gate as CRTP traffic so nothing is sent before the STM32
+        // can receive it.
+        if (radioReadyCommandReceived ||
+            (systickGetTick() >= sysonTime + SYSLINK_RADIO_DISABLED_TIMEOUT_MS))
+        {
+          memcpy(slTxPacket.data, mavlinkPayload, mavlinkPayloadLength);
+          slTxPacket.length = mavlinkPayloadLength;
+          slTxPacket.type = SYSLINK_RADIO_MAVLINK;
+          syslinkSend(&slTxPacket);
+        }
+      }
+      else if((packet->size >= 4) && (packet->data[0]&0xf3) == 0xf3 && (packet->data[1]==0x03))
       {
         handleRadioCmd(packet);
       }
@@ -378,6 +396,21 @@ static void handleSyslinkEvents(bool slReceived)
       case SYSLINK_OW_WRITE:
         if (memorySyslink(&slRxPacket)) {
           syslinkSend(&slRxPacket);
+        }
+        break;
+      case SYSLINK_RADIO_MAVLINK:
+        // One syslink packet becomes one radio packet. A chunk that does not
+        // fit is dropped rather than truncated: silently losing the tail
+        // would corrupt a MAVLink frame in a way the far end could not
+        // detect, whereas dropping it just costs a frame the CRC would have
+        // rejected anyway.
+        if (slRxPacket.length <= MAVLINK_TRANSPORT_MTU) {
+          mavlinkTransportSend((uint8_t *)slRxPacket.data, slRxPacket.length);
+        }
+        break;
+      case SYSLINK_RADIO_MAVLINK_MODE:
+        if (slRxPacket.length == 1) {
+          mavlinkTransportSetMode((MavlinkMode)slRxPacket.data[0]);
         }
         break;
       case SYSLINK_RADIO_P2P_BROADCAST:

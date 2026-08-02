@@ -99,6 +99,20 @@ uint8_t syslinkGetRxCheckSum2ErrorCnt();
 #define SYSLINK_RADIO_P2P_BROADCAST 0x0A
 #define SYSLINK_RADIO_READY         0x0B
 
+/* MAVLink transport.
+ *
+ * SYSLINK_RADIO_MAVLINK carries an opaque chunk of the MAVLink byte stream in
+ * both directions. The nRF does not parse MAVLink -- it does not need frame
+ * boundaries, because the far end feeds a byte-stream parser that resyncs on
+ * STX by design. One syslink packet becomes exactly one radio packet, so the
+ * payload must not exceed MAVLINK_TRANSPORT_MTU.
+ *
+ * SYSLINK_RADIO_MAVLINK_MODE carries a single byte, a MavlinkMode value,
+ * selecting broadcast-to-peers or unicast-to-ground-station.
+ */
+#define SYSLINK_RADIO_MAVLINK       0x0C
+#define SYSLINK_RADIO_MAVLINK_MODE  0x0D
+
 
 #define SYSLINK_PM_SOURCE             0x10
 #define SYSLINK_PM_ONOFF_SWITCHOFF    0x11
