@@ -321,7 +321,9 @@ static void handleSyslinkEvents(bool slReceived)
     switch (slRxPacket.type)
     {
       case SYSLINK_RADIO_RAW:
-        if (esbCanTxPacket() && (slRxPacket.length < SYSLINK_MTU))
+        // Bounded by the radio payload, not the syslink MTU: the MTU is the
+        // larger of the two, so testing against it would overrun packet->data.
+        if (esbCanTxPacket() && (slRxPacket.length <= ESB_MAX_PAYLOAD))
         {
           EsbPacket* packet = esbGetTxPacket();
 
@@ -336,7 +338,7 @@ static void handleSyslinkEvents(bool slReceived)
 
 #ifdef BLE
         if (bleEnabled) {
-          if (slRxPacket.length < SYSLINK_MTU) {
+          if (slRxPacket.length <= ESB_MAX_PAYLOAD) {
             static EsbPacket pk;
             memcpy(pk.data,  slRxPacket.data, slRxPacket.length);
             pk.size = slRxPacket.length;

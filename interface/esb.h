@@ -29,6 +29,28 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Maximum ESB payload in bytes.
+ *
+ * Values above 32 require the 8 bit on-air length field (PCNF0.LFLEN = 8),
+ * which is what Nordic's own ESB library switches to when its
+ * CONFIG_ESB_MAX_PAYLOAD_LENGTH exceeds 32. A radio configured for the 6 bit
+ * length field cannot talk to one configured for 8 bits, so both ends of the
+ * link must agree on this value. 252 is the ceiling for the Nordic format.
+ */
+#ifndef ESB_MAX_PAYLOAD
+  #define ESB_MAX_PAYLOAD 252
+#endif
+
+/* The S130 softdevice reserves the low 8KB of the nRF51822-QFAA's 16KB, which
+ * leaves 8216 bytes for the application. The radio queues at 252 byte payloads
+ * do not fit alongside the BLE stack -- the link fails with a bare "region RAM
+ * overflowed", so say why here instead. Building BLE=0 frees enough; freeing
+ * the softdevice's own 8KB (linker RAM origin) recovers considerably more.
+ */
+#if defined(BLE) && (BLE == 1) && (ESB_MAX_PAYLOAD > 63)
+  #error "ESB_MAX_PAYLOAD > 63 does not fit in RAM together with BLE. Build with BLE=0."
+#endif
+
 /* ESB Radio packet */
 typedef struct esbPacket_s {
   /* Part that is written by the radio DMA */
@@ -41,7 +63,7 @@ typedef struct esbPacket_s {
         uint8_t pid :2;
       };
     };
-    uint8_t data[63];
+    uint8_t data[ESB_MAX_PAYLOAD];
   } __attribute__((packed));
   /* Written by the radio interrupt routine */
   /* Since the value of the RSSI sample can only be between ~[0, 100] we down cast

@@ -39,7 +39,9 @@ static unsigned int requestSentTicks;
 
 void shutdownSendRequest()
 {
-  struct syslinkPacket slTxPacket = {
+  // Static rather than automatic: at SYSLINK_MTU 256 this object is 258 bytes,
+  // which would consume half of the 512 byte main stack.
+  static struct syslinkPacket slTxPacket = {
     .type = SYSLINK_PM_SHUTDOWN_REQUEST,
   };
 

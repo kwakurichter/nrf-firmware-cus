@@ -31,7 +31,12 @@
 #define SYSLINK_SEND_PERIOD_MS            10
 #define SYSLINK_RADIO_DISABLED_TIMEOUT_MS 3000
 
-#define SYSLINK_MTU 64
+/* Must be able to carry a full ESB payload, otherwise main.c overruns
+ * slTxPacket when forwarding a radio packet to the STM32. The on-wire length
+ * field is a single byte, capping a frame at 255 bytes -- still comfortably
+ * above ESB_MAX_PAYLOAD. The buffer is rounded up to 256 for alignment.
+ */
+#define SYSLINK_MTU 256
 
 struct syslinkPacket {
   uint8_t type;

@@ -39,8 +39,12 @@
   #include "pm.h"
 #endif
 
-#define RXQ_LEN 8
-#define TXQ_LEN 8
+/* Queue depths. At ESB_MAX_PAYLOAD = 252 each EsbPacket is ~260 bytes, so
+ * these are kept shallow to fit the nRF51822-QFAA RAM budget. One slot of each
+ * queue is reserved by the full/empty test, so the usable depth is LEN - 1.
+ */
+#define RXQ_LEN 3
+#define TXQ_LEN 3
 
 extern int bleEnabled;
 
@@ -75,9 +79,10 @@ static volatile bool has_safelink;
 // Radio startup gate - prevents RX from starting until explicitly allowed
 static bool radioStartAllowed = false;
 
-static EsbPacket ackPacket;     // Empty ack packet
-static EsbPacket servicePacket; // Packet sent to answer a low level request
-static EsbPacket p2pPacket;     // Packet to send to other crazyflie in broadcast
+static EsbPacket ackPacket;                         // Empty ack packet
+static EsbPacket servicePacket;                     // Packet sent to answer a low level request
+static volatile bool servicePacketPending = false;  // Flag that indicates if servicePacket is supposed to be transmitted. Must be set to true to send servicePacket, and will be set to false once it is sent
+static EsbPacket p2pPacket;                         // Packet to send to other crazyflie in broadcast
 /* helper functions */
 
 static uint32_t swap_bits(uint32_t inp)
@@ -119,13 +124,10 @@ static void setupTx(bool retry, bool empty)
         txq_tail = ((txq_tail+1)%TXQ_LEN);
       }
     }
-    if (lastSentPacket == &servicePacket) {
-      servicePacket.size = 0;
-    }
-
-    if (servicePacket.size) {
+    if (servicePacketPending) {
       NRF_RADIO->PACKETPTR = (uint32_t)&servicePacket;
       lastSentPacket = &servicePacket;
+      servicePacketPending = false;
     } else if (txq_tail != txq_head) {
       // Send next TX packet
       NRF_RADIO->PACKETPTR = (uint32_t)&txPackets[txq_tail];
@@ -208,6 +210,15 @@ void esbInterruptHandler()
       }
 
       pk = &rxPackets[rxq_head];
+
+      // The radio writes the on-air LENGTH field into pk->size verbatim, but
+      // only stores PCNF1.MAXLEN bytes of payload. With an 8 bit length field
+      // a corrupt (yet CRC-valid) length of up to 255 would therefore make
+      // every downstream memcpy read past the buffer, so clamp it here.
+      if (pk->size > ESB_MAX_PAYLOAD) {
+        pk->size = ESB_MAX_PAYLOAD;
+      }
+
       pk->rssi = (uint8_t) NRF_RADIO->RSSISAMPLE;
       pk->crc = NRF_RADIO->RXCRC;
       pk->match = NRF_RADIO->RXMATCH;
@@ -247,6 +258,7 @@ void esbInterruptHandler()
           has_safelink = pk->data[2];
           memcpy(servicePacket.data, pk->data, 3);
           servicePacket.size = 3;
+          servicePacketPending = true;
           setupTx(false, false);
 
           // Reset packet counters
@@ -300,14 +312,19 @@ void esbInterruptHandler()
 #define PACKET0_S1_SIZE                  (3UL)
 // S0 is not used
 #define PACKET0_S0_SIZE                  (0UL)
-// The size of the packet length field is 6 bits
-#define PACKET0_PAYLOAD_SIZE             (6UL)
+// The size of the packet length field. 6 bits only reaches 63, so payloads
+// above that need the 8 bit field. This must match the peer radio.
+#if ESB_MAX_PAYLOAD > 63
+  #define PACKET0_PAYLOAD_SIZE           (8UL)
+#else
+  #define PACKET0_PAYLOAD_SIZE           (6UL)
+#endif
 // The size of the base address field is 4 bytes
 #define PACKET1_BASE_ADDRESS_LENGTH      (4UL)
 // Don't use any extra added length besides the length field when sending
 #define PACKET1_STATIC_LENGTH            (0UL)
 // Max payload allowed in a packet
-#define PACKET1_PAYLOAD_SIZE             (63UL)
+#define PACKET1_PAYLOAD_SIZE             (ESB_MAX_PAYLOAD)
 
 void esbInit()
 {
@@ -472,6 +489,12 @@ void esbSendTxPacket()
 
 void esbSendP2PPacket(uint8_t port, char *data, uint8_t length)
 {
+  // Two header bytes are prepended, so the caller's payload has to leave room
+  // for them. length is a uint8_t and can reach 255 from a syslink packet.
+  if (length > ESB_MAX_PAYLOAD - 2) {
+    length = ESB_MAX_PAYLOAD - 2;
+  }
+
   p2pPacket.size = length + 2;
   p2pPacket.ack = 0;
   p2pPacket.data[0]= 0xff;
