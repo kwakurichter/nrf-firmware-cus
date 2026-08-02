@@ -49,9 +49,6 @@
 #include "memory.h"
 #include "ownet.h"
 
-#include "ble_int.h"
-#include "ble_crazyflies.h"
-
 extern void  initialise_monitor_handles(void);
 
 #ifndef SEMIHOSTING
@@ -67,19 +64,9 @@ extern void  initialise_monitor_handles(void);
 
 static void mainloop(void);
 
-#if BLE==0
-#undef BLE
-#endif
-
 #define MEMORY_BITCRAZE_VID 0xBC
 #define MEMORY_AIDECK_PID 0x12
 #define MEMORY_AIDECK_BOARDNAME "bcAI"
-
-#ifdef BLE
-int volatile bleEnabled = 1;
-#else
-int volatile bleEnabled = 0;
-#endif
 
 static struct syslinkPacket slRxPacket;
 static struct syslinkPacket slTxPacket;
@@ -96,7 +83,6 @@ static void handleSyslinkEvents(bool slReceived);
 
 static void handleRadioCmd(struct esbPacket_s * packet);
 static void handleBootloaderCmd(struct esbPacket_s *packet);
-static void disableBle();
 
 static bool debugProbeReceivedChan = false;
 static bool debugProbeReceivedAddress = false;
@@ -134,14 +120,8 @@ int main()
     msDelay(100);
   }
 
-  if (bleEnabled) {
-#ifdef BLE
-    ble_init();
-#endif
-  } else {
-    NRF_CLOCK->TASKS_HFCLKSTART = 1UL;
-    while(!NRF_CLOCK->EVENTS_HFCLKSTARTED);
-  }
+  NRF_CLOCK->TASKS_HFCLKSTART = 1UL;
+  while(!NRF_CLOCK->EVENTS_HFCLKSTARTED);
 
 #ifdef SEMIHOSTING
   initialise_monitor_handles();
@@ -175,12 +155,9 @@ int main()
 
   NRF_GPIO->PIN_CNF[RADIO_PAEN_PIN] |= GPIO_PIN_CNF_DIR_Output | (GPIO_PIN_CNF_DRIVE_S0H1<<GPIO_PIN_CNF_DRIVE_Pos);
 
-  if (!bleEnabled) {
-    esbInit();
-
-    esbSetDatarate(DEFAULT_RADIO_RATE);
-    esbSetChannel(DEFAULT_RADIO_CHANNEL);
-  }
+  esbInit();
+  esbSetDatarate(DEFAULT_RADIO_RATE);
+  esbSetChannel(DEFAULT_RADIO_CHANNEL);
 
   DEBUG_PRINT("Started\n");
 
@@ -219,14 +196,6 @@ void mainloop()
         radioStartupGateHandled = true;
       }
     }
-#ifdef BLE
-    if (bleEnabled) {
-      if ((esbReceived == false) && ble_receive_packet(&esbRxPacket)) {
-        esbReceived = true;
-      }
-    }
-#endif
-
 #ifndef CONT_WAVE_TEST
 
     if ((esbReceived == false) && esbIsRxPacket())
@@ -248,8 +217,6 @@ void mainloop()
       esbRxPacket.size = packet->size;
       esbReceived = true;
       esbReleaseRxPacket(packet);
-
-      disableBle();
     }
 
     if (esbReceived)
@@ -336,17 +303,6 @@ static void handleSyslinkEvents(bool slReceived)
           bzero(slRxPacket.data, SYSLINK_MTU);
         }
 
-#ifdef BLE
-        if (bleEnabled) {
-          if (slRxPacket.length <= ESB_MAX_PAYLOAD) {
-            static EsbPacket pk;
-            memcpy(pk.data,  slRxPacket.data, slRxPacket.length);
-            pk.size = slRxPacket.length;
-            ble_send_packet(&pk);
-          }
-        }
-#endif
-
         break;
       case SYSLINK_RADIO_CHANNEL:
         if(slRxPacket.length == 1)
@@ -425,10 +381,6 @@ static void handleSyslinkEvents(bool slReceived)
         }
         break;
       case SYSLINK_RADIO_P2P_BROADCAST:
-        // Check that bluetooth is disabled and disable it if not
-        if (bleEnabled) {
-          disableBle();
-        }
         // Send the P2P packet immediately without buffer
         esbSendP2PPacket(slRxPacket.data[0],&slRxPacket.data[1],slRxPacket.length-1);
         break;
@@ -624,12 +576,6 @@ static void handleBootloaderCmd(struct esbPacket_s *packet)
       memcpy(&(txpk.data[3]), (uint32_t*)NRF_FICR->DEVICEADDR, 6);
 
       txpk.size = 9;
-#ifdef BLE
-      if (bleEnabled) {
-        ble_send_packet(&txpk);
-      }
-#endif
-
       if (esbCanTxPacket()) {
         struct esbPacket_s *pk = esbGetTxPacket();
         memcpy(pk, &txpk, sizeof(struct esbPacket_s));
@@ -646,13 +592,7 @@ static void handleBootloaderCmd(struct esbPacket_s *packet)
           //Set bit 0x20 forces boot to firmware
           NRF_POWER->GPREGRET |= 0x20U;
         }
-        if (bleEnabled) {
-#ifdef BLE
-          sd_nvic_SystemReset();
-#endif
-        } else {
-          NVIC_SystemReset();
-        }
+        NVIC_SystemReset();
       }
       break;
     case BOOTLOADER_CMD_ALLOFF:
@@ -695,13 +635,3 @@ static void handleBootloaderCmd(struct esbPacket_s *packet)
   }
 }
 
-static void disableBle() {
-#ifdef BLE
-  if (bleEnabled) {
-    sd_softdevice_disable();
-    bleEnabled = 0;
-    esbInit();
-  }
-#endif
-  bleEnabled = 0;
-}

@@ -41,16 +41,6 @@
   #define ESB_MAX_PAYLOAD 252
 #endif
 
-/* The S130 softdevice reserves the low 8KB of the nRF51822-QFAA's 16KB, which
- * leaves 8216 bytes for the application. The radio queues at 252 byte payloads
- * do not fit alongside the BLE stack -- the link fails with a bare "region RAM
- * overflowed", so say why here instead. Building BLE=0 frees enough; freeing
- * the softdevice's own 8KB (linker RAM origin) recovers considerably more.
- */
-#if defined(BLE) && (BLE == 1) && (ESB_MAX_PAYLOAD > 63)
-  #error "ESB_MAX_PAYLOAD > 63 does not fit in RAM together with BLE. Build with BLE=0."
-#endif
-
 /* ESB Radio packet */
 typedef struct esbPacket_s {
   /* Part that is written by the radio DMA */

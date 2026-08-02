@@ -51,7 +51,6 @@
 #endif
 
 
-extern int bleEnabled;
 
 static PmConfig const *pmConfig;
 static PmState state;
@@ -179,13 +178,7 @@ static void pmNrfPower(bool enable)
 
     NRF_POWER->GPREGRET |= 0x01; // Workaround for not being able to determine reset reason...
 
-    if (bleEnabled) {
-#ifdef BLE
-      sd_power_system_off();
-#endif
-    } else {
-      NRF_POWER->SYSTEMOFF = 1UL;
-    }
+    NRF_POWER->SYSTEMOFF = 1UL;
 
     while(1);
   } else {

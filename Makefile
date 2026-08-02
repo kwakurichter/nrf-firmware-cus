@@ -4,12 +4,6 @@
 PLATFORM ?= cf2
 -include platform/platform_$(PLATFORM).mk
 
-ifeq ($(RECEIVE_RADIOTEST),1)
-BLE      ?= 0    # BLE mode activated or not. If disabled, CRTP mode is active
-else
-BLE	  ?= 1
-endif
-
 PYTHON            ?= python3
 
 # Cload is handled in a special way on windows in WSL to use the Windows python interpreter
@@ -54,8 +48,6 @@ SRC_FILES += $(SDK_ROOT)/components/libraries/util/app_error_weak.c
 SRC_FILES += $(SDK_ROOT)/components/libraries/timer/app_timer.c
 SRC_FILES += $(SDK_ROOT)/components/libraries/util/app_util_platform.c
 #SRC_FILES += $(SDK_ROOT)/components/libraries/crc16/crc16.c
-SRC_FILES += $(SDK_ROOT)/components/libraries/fds/fds.c
-SRC_FILES += $(SDK_ROOT)/components/libraries/fstorage/fstorage.c
 #SRC_FILES += $(SDK_ROOT)/components/libraries/hardfault/hardfault_implementation.c
 #SRC_FILES += $(SDK_ROOT)/components/libraries/util/nrf_assert.c
 #SRC_FILES += $(SDK_ROOT)/components/libraries/util/sdk_errors.c
@@ -67,34 +59,12 @@ SRC_FILES += $(SDK_ROOT)/components/drivers_nrf/clock/nrf_drv_clock.c
 SRC_FILES += $(SDK_ROOT)/components/drivers_nrf/common/nrf_drv_common.c
 #SRC_FILES += $(SDK_ROOT)/components/drivers_nrf/gpiote/nrf_drv_gpiote.c
 SRC_FILES += $(SDK_ROOT)/components/libraries/bsp/bsp.c
-SRC_FILES += $(SDK_ROOT)/components/libraries/bsp/bsp_btn_ble.c
 #SRC_FILES += $(SDK_ROOT)/components/libraries/bsp/bsp_nfc.c
 SRC_FILES += $(SDK_ROOT)/external/segger_rtt/RTT_Syscalls_GCC.c
 SRC_FILES += $(SDK_ROOT)/external/segger_rtt/SEGGER_RTT.c
 SRC_FILES += $(SDK_ROOT)/external/segger_rtt/SEGGER_RTT_printf.c
-SRC_FILES += $(SDK_ROOT)/components/ble/common/ble_advdata.c
-SRC_FILES += $(SDK_ROOT)/components/ble/ble_advertising/ble_advertising.c
-SRC_FILES += $(SDK_ROOT)/components/ble/common/ble_conn_params.c
-SRC_FILES += $(SDK_ROOT)/components/ble/common/ble_conn_state.c
-SRC_FILES += $(SDK_ROOT)/components/ble/common/ble_srv_common.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/gatt_cache_manager.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/gatts_cache_manager.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/id_manager.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/peer_data.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/peer_data_storage.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/peer_database.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/peer_id.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/peer_manager.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/pm_buffer.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/pm_mutex.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/security_dispatcher.c
-SRC_FILES += $(SDK_ROOT)/components/ble/peer_manager/security_manager.c
 SRC_FILES += $(SDK_ROOT)/components/toolchain/gcc/gcc_startup_nrf51.S
 SRC_FILES += $(SDK_ROOT)/components/toolchain/system_nrf51.c
-SRC_FILES += $(SDK_ROOT)/components/softdevice/common/softdevice_handler/softdevice_handler.c
-SRC_FILES += $(PROJ_DIR)/ble/ble.c
-SRC_FILES += $(PROJ_DIR)/ble/ble_crazyflies.c
-SRC_FILES += $(PROJ_DIR)/ble/timeslot.c
 SRC_FILES += $(PROJ_DIR)/ow.c
 SRC_FILES += $(PROJ_DIR)/ow/owlnk.c
 SRC_FILES += $(PROJ_DIR)/ow/ownet.c
@@ -220,10 +190,8 @@ CFLAGS += -DBOARD_${BOARD}
 CFLAGS += -DSOFTDEVICE_PRESENT
 CFLAGS += -DNRF51
 CFLAGS += -DS130
-CFLAGS += -DBLE_STACK_SUPPORT_REQD
 CFLAGS += -DSWI_DISABLE0
 CFLAGS += -DNRF51422
-CFLAGS += -DNRF_SD_BLE_API_VERSION=2
 CFLAGS += -mcpu=cortex-m0
 CFLAGS += -mthumb -mabi=aapcs
 CFLAGS +=  -Wall -Werror -Os -g3 -fsingle-precision-constant -ffast-math -std=gnu11
@@ -236,10 +204,6 @@ CFLAGS += -Wno-error=array-bounds
 
 # Enable app config
 CFLAGS += -DUSE_APP_CONFIG
-
-ifeq ($(strip $(BLE)), 1)
-CFLAGS += -DBLE=1
-endif
 
 ifeq ($(strip $(RADIOTEST)), 1)
 CFLAGS += -DRADIOTEST=1
@@ -265,10 +229,8 @@ ASMFLAGS += -DBOARD_${BOARD}
 ASMFLAGS += -DSOFTDEVICE_PRESENT
 ASMFLAGS += -DNRF51
 ASMFLAGS += -DS130
-ASMFLAGS += -DBLE_STACK_SUPPORT_REQD
 ASMFLAGS += -DSWI_DISABLE0
 ASMFLAGS += -DNRF51422
-ASMFLAGS += -DNRF_SD_BLE_API_VERSION=2
 ASMFLAGS += -D__STACK_SIZE=512
 ASMFLAGS += -D__HEAP_SIZE=512
 
@@ -285,11 +247,6 @@ LDFLAGS += --specs=nano.specs -lc -lnosys
 
 # Default target - first one defined
 default: $(PROGRAM)
-ifeq ($(strip $(BLE)),1)
-	@echo "BLE  Activated"
-else
-	@echo "BLE  Disabled"
-endif
 	@echo "Built for platform $(PLATFORM)"
 
 # Print all targets that can be built
