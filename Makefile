@@ -245,6 +245,13 @@ ifeq ($(strip $(RADIOTEST)), 1)
 CFLAGS += -DRADIOTEST=1
 endif
 
+# Override the ESB payload ceiling. 32 or below keeps the legacy 6 bit on-air
+# length field, which is what a stock Crazyradio speaks -- useful for bisecting
+# whether a problem is the packet format or something else.
+ifneq ($(strip $(ESB_MAX_PAYLOAD)),)
+CFLAGS += -DESB_MAX_PAYLOAD=$(ESB_MAX_PAYLOAD)
+endif
+
 ifeq ($(strip $(EXT_ANTENNA)), 1)
 CFLAGS += -DUSE_EXT_ANTENNA=1
 endif
@@ -331,29 +338,40 @@ flash_s130: $(SDK_ROOT)/components/softdevice/s130/hex/s130_nrf51_2.0.1_softdevi
                  -c "flash write_image erase $(SDK_ROOT)/components/softdevice/s130/hex/s130_nrf51_2.0.1_softdevice.hex" \
                  -c "reset run" -c shutdown
 
-# flash_mbs: bootloaders/nrf_mbs_v1.0.hex
-# 	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
-#                  -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
-# 	               -c "reset run" -c shutdown
+# SWD recovery targets. Re-enabled from upstream (where they are commented out)
+# so that a full factory restore is possible over SWD.
+#
+# The mww pairs write UICR, which is one-time-programmable until the next mass
+# erase: 0x4001e504 is NVMC->CONFIG (0x01 = write enable), 0x10001014 is
+# UICR->BOOTLOADERADDR pointed at the MBS (0x3F000 = 252K) and 0x10001080 is
+# UICR->CUSTOMER[0] pointed at the cload bootloader (0x3A000 = 232K). Both
+# match the flash map in docs/development/architecture.md. Run `mass_erase`
+# first if UICR has already been written, or the writes will silently AND
+# against the existing value.
 
-# flash_cload: bootloaders/cload_nrf_v1.0.hex
-# 	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
-#                  -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001080 0x3A000" -c "reset run" -c shutdown
+flash_mbs: bootloaders/nrf_mbs_v1.0.hex
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
+                 -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
+	               -c "reset run" -c shutdown
 
-# flash_mbs_21: bootloaders/nrf_mbs_cf21.hex
-# 	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
-#                  -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
-# 	               -c "reset run" -c shutdown
+flash_cload: bootloaders/cload_nrf_v1.0.hex
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
+                 -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001080 0x3A000" -c "reset run" -c shutdown
 
-# flash_cload_21: bootloaders/cload_nrf_cf21.hex
-# 	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
-#                  -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
-# 	               -c "mww 0x4001e504 0x01" -c "mww 0x10001080 0x3A000" -c "reset run" -c shutdown
+flash_mbs_21: bootloaders/nrf_mbs_cf21.hex
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
+                 -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
+	               -c "reset run" -c shutdown
+
+flash_cload_21: bootloaders/cload_nrf_cf21.hex
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
+                 -c "flash write_image erase $^" -c "verify_image $^" -c "reset halt" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001014 0x3F000" \
+	               -c "mww 0x4001e504 0x01" -c "mww 0x10001080 0x3A000" -c "reset run" -c shutdown
 
 mass_erase:
 	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
@@ -381,16 +399,21 @@ else
 	@echo "Only cload build can be bootloaded. Launch build and cload with CLOAD=1"
 endif
 
-# factory_reset:
-# 	make mass_erase
-# 	make flash_s130
-# 	make flash_mbs
-# 	make flash_cload
-# 	make flash
+# Full restore over SWD: erases everything (including UICR) and rebuilds the
+# whole boot chain. Use factory_reset_21 on a Crazyflie 2.1 and later.
+# Note that the final `make flash` writes whatever is currently in _build, so
+# build stock firmware first if that is what you want back.
 
-# factory_reset_21:
-# 	make mass_erase
-# 	make flash_s130
-# 	make flash_mbs_21
-# 	make flash_cload_21
-# 	make flash
+factory_reset:
+	make mass_erase
+	make flash_s130
+	make flash_mbs
+	make flash_cload
+	make flash
+
+factory_reset_21:
+	make mass_erase
+	make flash_s130
+	make flash_mbs_21
+	make flash_cload_21
+	make flash
