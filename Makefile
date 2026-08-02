@@ -231,7 +231,10 @@ ASMFLAGS += -DNRF51
 ASMFLAGS += -DS130
 ASMFLAGS += -DSWI_DISABLE0
 ASMFLAGS += -DNRF51422
-ASMFLAGS += -D__STACK_SIZE=512
+# 512 bytes of stack was what fit alongside the softdevice's RAM reservation.
+# With that reclaimed there is no reason to run that close to the edge on a
+# Cortex-M0, where a single deep call chain would silently corrupt .bss.
+ASMFLAGS += -D__STACK_SIZE=2048
 ASMFLAGS += -D__HEAP_SIZE=512
 
 # Linker flags
