@@ -30,34 +30,36 @@
 /* Usable payload per radio packet, after the marker byte. */
 #define MAVLINK_TRANSPORT_MTU (ESB_MAX_PAYLOAD - 1)
 
-typedef enum {
-  /* Unicast to the ground station, with ESB's hardware ack and retry.
-   * The Crazyflie is a PRX, so downlink rides in ack payloads and is only
-   * sent when the ground station polls -- the same way CRTP downlink works. */
-  mavlinkModeTelemetry = 0,
-  /* Broadcast to any peer on the shared address. Unacked, which is the
-   * correct semantic for peer-to-peer: there is no single receiver to ack. */
-  mavlinkModeP2P = 1,
-} MavlinkMode;
-
-/* Select the transport mode. Takes effect on the next transmission. */
-void mavlinkTransportSetMode(MavlinkMode mode);
-
-MavlinkMode mavlinkTransportGetMode(void);
+/**
+ * Queue a chunk for unicast transmission to the ground station.
+ *
+ * ESB's hardware ack and retry apply. The Crazyflie is a PRX, so this only
+ * queues -- the chunk leaves in an ack payload the next time the ground
+ * station polls, the same way CRTP downlink works. It therefore fails when
+ * the queue is full, and the caller must handle that rather than assume the
+ * write succeeded. mavlinkTransportTxFreeSlots() reports the room available.
+ *
+ * @return false if the chunk is too long or the transmit queue is full.
+ */
+bool mavlinkTransportSendUnicast(const uint8_t *data, uint8_t length);
 
 /**
- * Queue a chunk of the MAVLink byte stream for transmission.
+ * Broadcast a chunk to any peer on the shared address.
  *
- * The chunk is sent verbatim, so the caller decides where frame boundaries
- * fall. Keeping one MAVLink frame per call avoids a lost radio packet
- * corrupting two frames instead of one.
+ * Unacked, which is the correct semantic for peer-to-peer: there is no single
+ * receiver to acknowledge. Sent immediately rather than queued, so it cannot
+ * fail for lack of room.
  *
- * @param data Bytes to send.
- * @param length Number of bytes, at most MAVLINK_TRANSPORT_MTU.
- * @return false if the chunk is too long, or if the transmit queue is full
- *         (telemetry mode only -- broadcasts are sent immediately).
+ * @return false only if the chunk is too long.
  */
-bool mavlinkTransportSend(const uint8_t *data, uint8_t length);
+bool mavlinkTransportSendBroadcast(const uint8_t *data, uint8_t length);
+
+/**
+ * Number of chunks that can still be queued for unicast transmission.
+ *
+ * Broadcasts do not consume queue slots and are not counted.
+ */
+uint8_t mavlinkTransportTxFreeSlots(void);
 
 /**
  * Test whether a received radio packet belongs to the MAVLink transport.

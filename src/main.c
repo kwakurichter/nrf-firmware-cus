@@ -79,6 +79,7 @@ static bool enableBatteryAutoupdate = false;
 
 static void syslinkEnableBatteryMessages();
 static void sendDataToStmOverSyslink();
+static void reportMavlinkTxSpace();
 static void handleButtonEvents();
 static void handleSyslinkEvents(bool slReceived);
 
@@ -238,7 +239,10 @@ void mainloop()
         {
           memcpy(slTxPacket.data, mavlinkPayload, mavlinkPayloadLength);
           slTxPacket.length = mavlinkPayloadLength;
-          slTxPacket.type = SYSLINK_RADIO_MAVLINK;
+          // Report which address it arrived on, so the STM32 can tell a
+          // ground station apart from a peer without any mode state.
+          slTxPacket.type = broadcast ? SYSLINK_RADIO_MAVLINK_BROADCAST
+                                      : SYSLINK_RADIO_MAVLINK;
           syslinkSend(&slTxPacket);
         }
       }
@@ -284,6 +288,7 @@ void mainloop()
 
     handleSyslinkEvents(syslinkReceive(&slRxPacket));
     sendDataToStmOverSyslink();
+    reportMavlinkTxSpace();
 
 #endif
 
@@ -405,12 +410,14 @@ static void handleSyslinkEvents(bool slReceived)
         // detect, whereas dropping it just costs a frame the CRC would have
         // rejected anyway.
         if (slRxPacket.length <= MAVLINK_TRANSPORT_MTU) {
-          mavlinkTransportSend((uint8_t *)slRxPacket.data, slRxPacket.length);
+          mavlinkTransportSendUnicast((uint8_t *)slRxPacket.data,
+                                      slRxPacket.length);
         }
         break;
-      case SYSLINK_RADIO_MAVLINK_MODE:
-        if (slRxPacket.length == 1) {
-          mavlinkTransportSetMode((MavlinkMode)slRxPacket.data[0]);
+      case SYSLINK_RADIO_MAVLINK_BROADCAST:
+        if (slRxPacket.length <= MAVLINK_TRANSPORT_MTU) {
+          mavlinkTransportSendBroadcast((uint8_t *)slRxPacket.data,
+                                        slRxPacket.length);
         }
         break;
       case SYSLINK_RADIO_P2P_BROADCAST:
@@ -485,6 +492,38 @@ static void syslinkEnableBatteryMessages()
   enableBatteryAutoupdate = true;
 }
 
+
+/* Tell the STM32 how much transmit room is left, so it can apply
+ * backpressure.
+ *
+ * This is needed because nothing else reports it. The UART flow control line
+ * reflects the nRF's UART receive FIFO, not the radio queue -- the main loop
+ * keeps draining syslink when the queue is full and simply drops chunks, so
+ * that line never asserts for this. Without a report the STM32 would have no
+ * way to know its chunks were being discarded.
+ *
+ * Sent only on change. The queue drains in the radio interrupt, so the count
+ * moves at roughly twice the packet rate; at 7 bytes a report that is a
+ * rounding error against the UART budget.
+ */
+static void reportMavlinkTxSpace()
+{
+  static uint8_t lastReported = 0xff;
+
+  uint8_t free = mavlinkTransportTxFreeSlots();
+
+  if (free == lastReported) {
+    return;
+  }
+
+  slTxPacket.type = SYSLINK_RADIO_MAVLINK_SPACE;
+  slTxPacket.length = 1;
+  slTxPacket.data[0] = free;
+
+  if (syslinkSend(&slTxPacket)) {
+    lastReported = free;
+  }
+}
 
 static void sendDataToStmOverSyslink()
 {

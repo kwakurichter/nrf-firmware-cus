@@ -11,39 +11,23 @@
  * every frame fits in a single packet, and the far end runs a byte-stream
  * parser that resyncs on STX anyway, so there is nothing for the nRF to gain
  * by understanding the contents. It stays a pipe.
+ *
+ * There is no transport mode. The radio receives on the unicast and broadcast
+ * addresses at the same time and chooses the transmit address per packet, so
+ * telemetry and peer-to-peer traffic can be interleaved with no state on
+ * either side of syslink.
  */
 
 #include <string.h>
 
 #include "mavlink_transport.h"
 
-static MavlinkMode mode = mavlinkModeTelemetry;
-
-void mavlinkTransportSetMode(MavlinkMode newMode)
-{
-  mode = newMode;
-}
-
-MavlinkMode mavlinkTransportGetMode(void)
-{
-  return mode;
-}
-
-bool mavlinkTransportSend(const uint8_t *data, uint8_t length)
+bool mavlinkTransportSendUnicast(const uint8_t *data, uint8_t length)
 {
   if (length > MAVLINK_TRANSPORT_MTU) {
     return false;
   }
 
-  if (mode == mavlinkModeP2P) {
-    // Broadcasts are unacked and go out immediately, so there is no queue to
-    // fill and nothing to report back other than the length check above.
-    esbSendBroadcast(MAVLINK_AIR_MARKER, data, length);
-    return true;
-  }
-
-  // Telemetry mode. The Crazyflie is a PRX, so this only queues the chunk --
-  // it goes out as an ack payload the next time the ground station polls.
   if (!esbCanTxPacket()) {
     return false;
   }
@@ -60,6 +44,22 @@ bool mavlinkTransportSend(const uint8_t *data, uint8_t length)
   esbSendTxPacket();
 
   return true;
+}
+
+bool mavlinkTransportSendBroadcast(const uint8_t *data, uint8_t length)
+{
+  if (length > MAVLINK_TRANSPORT_MTU) {
+    return false;
+  }
+
+  esbSendBroadcast(MAVLINK_AIR_MARKER, data, length);
+
+  return true;
+}
+
+uint8_t mavlinkTransportTxFreeSlots(void)
+{
+  return esbTxFreeSlots();
 }
 
 bool mavlinkTransportReceive(const EsbPacket *packet,

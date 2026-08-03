@@ -222,9 +222,14 @@ either this command is received or a 3 second timeout expires.
 -   **Data format**: Opaque chunk of the MAVLink byte stream, 1 to 251
     bytes.
 
-Carries MAVLink in both directions. The NRF51 does not parse the
-contents: one syslink packet becomes exactly one radio packet, and one
-radio packet becomes exactly one syslink packet.
+Unicast between the Crazyflie and a ground station, with ESB's hardware
+ack and retry. Sent in both directions.
+
+The NRF51 does not parse the contents: one syslink packet becomes
+exactly one radio packet, and one radio packet becomes exactly one
+syslink packet. There is no reassembly anywhere, and none is needed --
+the far end feeds a byte-stream parser that resyncs on STX, so a lost
+chunk costs one frame.
 
 The 251 byte ceiling is the 252 byte ESB payload less the one byte
 on-air marker that distinguishes MAVLink traffic from the CRTP-derived
@@ -232,33 +237,50 @@ control packets the NRF51 still answers locally. A longer chunk is
 dropped rather than truncated, since silently losing the tail would
 corrupt a frame in a way the receiver could not detect.
 
-There is no reassembly anywhere in the NRF51. None is needed: the far
-end feeds a byte-stream parser that resyncs on STX, so a lost chunk
-costs one frame. Note that a MAVLink v2 frame can reach 267 bytes
-unsigned (280 signed), which does not fit in one radio packet — the
-sender should split those, accepting that losing either half costs the
-frame. Sending one whole frame per packet where possible keeps a single
-lost packet from damaging two frames.
+Note that a MAVLink v2 frame can reach 267 bytes unsigned (280 signed),
+which does not fit in one radio packet -- the sender must split those.
+Sending one whole frame per chunk where it fits keeps a single lost
+packet from damaging two frames.
 
-### SYSLINK\_RADIO\_MAVLINK\_MODE
+Transmission is queued, not immediate: the Crazyflie is a PRX, so
+chunks leave in ack payloads only when the ground station polls. The
+queue can fill. See SYSLINK\_RADIO\_MAVLINK\_SPACE.
+
+### SYSLINK\_RADIO\_MAVLINK\_BROADCAST
 
 -   **Type**: 0x0D
--   **Data format**: 1 byte
+-   **Data format**: Same as SYSLINK\_RADIO\_MAVLINK.
 
-Selects how MAVLink chunks are transmitted. Takes effect on the next
-transmission; the default is telemetry.
+Peer-to-peer. Broadcast on the shared address, unacked, with no retry --
+the correct semantic when there is no single receiver to acknowledge.
 
-| Value | Mode      | Behaviour                                                     |
-| ----- | --------- | ------------------------------------------------------------- |
-| 0     | Telemetry | Unicast to the ground station, with ESB hardware ack and retry |
-| 1     | P2P       | Broadcast to peers on the shared address, unacked              |
+Identical to the unicast type in every other respect. The destination is
+carried by the packet type rather than by a mode setting because the
+radio receives on the unicast and broadcast addresses simultaneously and
+selects the transmit address per packet. Telemetry and peer traffic can
+therefore be interleaved freely, in both directions, with no mode state
+on either side of syslink. On receive, the type tells the STM32 which
+address the chunk arrived on.
 
-In telemetry mode the Crazyflie is a PRX, so downlink chunks are queued
-and leave in ack payloads only when the ground station polls — the same
-way CRTP downlink works. A send can therefore fail when the queue is
-full. In P2P mode chunks are broadcast immediately and unacked, which is
-the correct semantic for peer-to-peer since there is no single receiver
-to acknowledge them.
+Unlike the unicast type this is transmitted immediately rather than
+queued, so it does not consume a transmit slot and cannot fail for lack
+of room.
+
+### SYSLINK\_RADIO\_MAVLINK\_SPACE
+
+-   **Type**: 0x0E
+-   **Data format**: 1 byte, number of free unicast transmit slots.
+
+Sent unsolicited by the NRF51 whenever the count changes, so the STM32
+can apply backpressure. Peaks at 5.
+
+This exists because nothing else reports it. The UART flow control line
+reflects the NRF51's UART receive FIFO, not the radio queue: the NRF51
+keeps reading syslink when that queue is full and simply drops chunks,
+so the line never asserts for this condition. Both mechanisms are
+needed, and they guard different things.
+
+Broadcasts do not consume slots and are not counted.
 
 Power management packets
 ------------------------

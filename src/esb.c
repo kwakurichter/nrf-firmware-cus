@@ -471,6 +471,17 @@ bool esbCanTxPacket()
   return ((txq_head+1)%TXQ_LEN)!=txq_tail;
 }
 
+uint8_t esbTxFreeSlots()
+{
+  // Sampled once each: the radio interrupt can advance txq_tail underneath
+  // us, which only ever makes the answer conservative.
+  int head = txq_head;
+  int tail = txq_tail;
+  int used = (head - tail + TXQ_LEN) % TXQ_LEN;
+
+  return (uint8_t)((TXQ_LEN - 1) - used);
+}
+
 EsbPacket * esbGetTxPacket()
 {
   EsbPacket *pk = NULL;

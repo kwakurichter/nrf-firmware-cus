@@ -22,11 +22,16 @@ owns the radio and is reached over a UART running a framed protocol called
 **syslink**. To ArduPilot, the nRF51 should be treated as a dumb, lossy,
 packet-oriented serial link.
 
-Two link modes exist, selected at runtime:
+Two destinations exist, and they are **not** modes — they are concurrent:
 
-- **Telemetry** — unicast to a ground station via a Crazyradio 2.0. The
-  radio's hardware ack and automatic retry apply.
-- **P2P** — broadcast to any peer on the shared address. Unacked, no retry.
+- **Unicast** — to a ground station via a Crazyradio 2.0. Hardware ack and
+  automatic retry apply.
+- **Broadcast** — to any peer on the shared address. Unacked, no retry.
+
+The radio receives on both addresses simultaneously and picks the transmit
+address per packet, so there is no mode to set, nothing to reconfigure, and no
+restart. Telemetry and peer traffic interleave freely in both directions. The
+destination is carried by the syslink packet type.
 
 ## What the nRF51 does and does not do
 
@@ -41,7 +46,12 @@ unrelated to MAVLink.
 
 ## Syslink framing
 
-Serial, **1 Mbaud, 8N1**, no flow control.
+Serial, **1 Mbaud, 8N1**.
+
+The nRF51 drives RTS (`NRF_FLOW_CTRL` in the ArduPilot hwdef) from its UART
+receive FIFO, so the STM32 should gate transmission on it to avoid overrunning
+the nRF51's UART. There is no CTS in the other direction. This line has
+nothing to do with radio queue depth — see requirement 4.
 
 ```
 +-----------+------+-----+=============+-----+-----+
@@ -55,22 +65,29 @@ Serial, **1 Mbaud, 8N1**, no flow control.
 - `CKSUM` — two-byte Fletcher-8 checksum ([RFC 1146](https://tools.ietf.org/html/rfc1146))
   computed over `TYPE`, `LEN` and `DATA`
 
-## The two MAVLink packet types
+## MAVLink packet types
 
 ### `SYSLINK_RADIO_MAVLINK` — `0x0C`
 
-Carries an opaque chunk of the MAVLink byte stream, **1 to 251 bytes**, in
-both directions. STM32→nRF51 transmits it; nRF51→STM32 delivers what arrived
-over the air.
+An opaque chunk of the MAVLink byte stream, **1 to 251 bytes**, unicast to the
+ground station. Both directions: STM32→nRF51 transmits, nRF51→STM32 delivers
+what arrived on the unicast address.
 
-### `SYSLINK_RADIO_MAVLINK_MODE` — `0x0D`
+Queued, not immediate — see requirement 4.
 
-One byte, sets the link mode. Takes effect on the next transmission.
+### `SYSLINK_RADIO_MAVLINK_BROADCAST` — `0x0D`
 
-| Value | Mode      |
-| ----- | --------- |
-| 0     | Telemetry (default) |
-| 1     | P2P       |
+Identical payload, but broadcast to peers instead. On receive, this type means
+the chunk arrived on the broadcast address.
+
+Sent immediately rather than queued, so it consumes no transmit slot and
+cannot fail for lack of room.
+
+### `SYSLINK_RADIO_MAVLINK_SPACE` — `0x0E`
+
+One byte: free unicast transmit slots, peaking at 5. Sent **unsolicited by the
+nRF51 whenever the count changes**. This is the backpressure signal — see
+requirement 4.
 
 ## Operating requirements
 
@@ -92,17 +109,26 @@ the frame.
 **3. Send one whole frame per chunk where it fits.** Nothing enforces frame
 alignment, but a chunk spanning two frames means one lost packet damages both.
 
-**4. Transmission can fail; handle backpressure.** In telemetry mode the
-Crazyflie is a receiver from the radio's point of view, so downlink only
-leaves in ack payloads when the ground station polls. If it stops polling, the
-queue fills. Usable depth is **5 chunks**. Do not assume a write succeeded —
-the driver must be able to block or drop deliberately. P2P broadcasts are sent
-immediately and cannot fail this way.
+**4. Unicast transmission can fail; use the space report for backpressure.**
+The Crazyflie is a receiver from the radio's point of view, so downlink chunks
+only leave in ack payloads when the ground station polls. If it stops polling,
+the queue fills and further chunks are silently dropped. Usable depth is **5**.
 
-**5. The link is lossy and unordered-on-failure.** ESB retries in telemetry
-mode but eventually gives up; P2P has no retry at all. MAVLink tolerates this
-by design — the parser resyncs on `STX`. Do not build anything that assumes
-reliable delivery.
+Track free slots from `SYSLINK_RADIO_MAVLINK_SPACE`: decrement locally on each
+unicast send, and refresh from the report. That value is what `txspace()`
+should be derived from. Broadcasts do not consume slots.
+
+**Do not rely on the `NRF_FLOW_CTRL` pin for this.** That line is the nRF51's
+UART RTS and reflects its UART receive FIFO only. The nRF51 keeps draining
+syslink when the radio queue is full — it just discards chunks — so the line
+never asserts for this condition. Both mechanisms are needed and they guard
+different things: the pin prevents UART overrun, the space report prevents
+radio-queue overflow. Note the nRF51 drives RTS but has no CTS input, so
+hardware flow control is one-directional.
+
+**5. The link is lossy.** Unicast retries in hardware but eventually gives up;
+broadcast has no retry at all. MAVLink tolerates this by design — the parser
+resyncs on `STX`. Do not build anything that assumes reliable delivery.
 
 **6. ArduPilot owns the radio configuration.** The nRF51's compiled-in
 defaults (channel 80, address `E7E7E7E7E7`) are **not** what the radio ends up

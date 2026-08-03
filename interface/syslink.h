@@ -101,17 +101,28 @@ uint8_t syslinkGetRxCheckSum2ErrorCnt();
 
 /* MAVLink transport.
  *
- * SYSLINK_RADIO_MAVLINK carries an opaque chunk of the MAVLink byte stream in
- * both directions. The nRF does not parse MAVLink -- it does not need frame
- * boundaries, because the far end feeds a byte-stream parser that resyncs on
- * STX by design. One syslink packet becomes exactly one radio packet, so the
- * payload must not exceed MAVLINK_TRANSPORT_MTU.
+ * Both directions carry an opaque chunk of the MAVLink byte stream. The nRF
+ * does not parse MAVLink -- it does not need frame boundaries, because the far
+ * end feeds a byte-stream parser that resyncs on STX by design. One syslink
+ * packet becomes exactly one radio packet, so the payload must not exceed
+ * MAVLINK_TRANSPORT_MTU.
  *
- * SYSLINK_RADIO_MAVLINK_MODE carries a single byte, a MavlinkMode value,
- * selecting broadcast-to-peers or unicast-to-ground-station.
+ * The destination is encoded in the packet type rather than a mode setting,
+ * matching SYSLINK_RADIO_RAW / _RAW_BROADCAST. The radio listens on the
+ * unicast and broadcast addresses simultaneously and picks the transmit
+ * address per packet, so telemetry and peer-to-peer traffic can be
+ * interleaved freely with no mode to track on either side.
+ *
+ * SYSLINK_RADIO_MAVLINK_SPACE reports how many transmit slots are free, so
+ * the STM32 can apply backpressure. The nRF sends it unsolicited whenever the
+ * count changes. This is NOT the same thing as the UART flow control line,
+ * which reflects the nRF's UART receive FIFO and says nothing about the radio
+ * queue -- the nRF keeps reading syslink when that queue is full and simply
+ * drops chunks.
  */
-#define SYSLINK_RADIO_MAVLINK       0x0C
-#define SYSLINK_RADIO_MAVLINK_MODE  0x0D
+#define SYSLINK_RADIO_MAVLINK           0x0C
+#define SYSLINK_RADIO_MAVLINK_BROADCAST 0x0D
+#define SYSLINK_RADIO_MAVLINK_SPACE     0x0E
 
 
 #define SYSLINK_PM_SOURCE             0x10

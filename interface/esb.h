@@ -95,6 +95,14 @@ void esbReleaseRxPacket();
 /* Return true if a packet can be pushed in the TX queue */
 bool esbCanTxPacket();
 
+/* Number of packets that can still be queued for transmission.
+ *
+ * One slot is reserved by the queue's full/empty test, so this peaks at
+ * TXQ_LEN - 1. Callers that push from outside the radio interrupt need this
+ * to apply backpressure: the queue drains only when the peer polls, so it can
+ * stay full indefinitely if the peer goes away. */
+uint8_t esbTxFreeSlots();
+
 /* Return the address of the next TX packet in the TX queue */
 EsbPacket * esbGetTxPacket();
 
