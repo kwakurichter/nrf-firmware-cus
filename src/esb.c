@@ -38,12 +38,25 @@
   #include "pm.h"
 #endif
 
-/* Queue depths. At ESB_MAX_PAYLOAD = 252 each EsbPacket is ~260 bytes, so
- * these are kept shallow to fit the nRF51822-QFAA RAM budget. One slot of each
- * queue is reserved by the full/empty test, so the usable depth is LEN - 1.
+/* Queue depths. Each EsbPacket is 264 bytes at ESB_MAX_PAYLOAD = 252, and one
+ * slot of each queue is reserved by the full/empty test, so the usable depth
+ * is LEN - 1.
+ *
+ * RX is the deeper of the two because its drain side stalls. syslinkSend()
+ * writes through uartPutc(), which busy-waits on TXDRDY for every byte, so
+ * forwarding one full packet blocks the main loop for the whole transfer:
+ * 257 bytes at 1 Mbaud 8N1 is about 2.6 ms. The radio interrupt keeps filling
+ * the queue throughout, and at 2 Mbit a 252 byte poll cycle is roughly 1.4 ms,
+ * so a single forward can absorb two arrivals before the main loop looks
+ * again. A usable depth of 7 leaves room for that plus burst jitter.
+ *
+ * TX is shallower on purpose. It drains only when the ground station polls,
+ * so extra depth does not raise throughput -- it just holds telemetry longer
+ * before it goes out. Stale attitude data is worse than dropped attitude
+ * data, so this buffers jitter and no more.
  */
-#define RXQ_LEN 3
-#define TXQ_LEN 3
+#define RXQ_LEN 8
+#define TXQ_LEN 6
 
 static bool isInit = true;
 
