@@ -36,6 +36,16 @@ and
 [nrf51](https://github.com/bitcraze/crazyflie2-nrf-firmware/blob/master/interface/syslink.h)
 firmware).
 
+**Important**: the NRF51 does not transmit on syslink until it has
+received one packet that passes both checksum bytes. Before that,
+`syslinkSend()` silently does nothing, so no battery, RSSI, MAVLink or
+handshake packets are emitted. Any valid packet lifts the gate; the
+zero-length SYSLINK\_RADIO\_READY frame `BC CF 0B 00 0B 16` is the
+natural choice because the NRF51 echoes it back, confirming baud rate,
+framing and checksum in one step. See
+[ArduPilot integration](../development/ardupilot-integration.md) for the
+full bring-up sequence.
+
 Packets are organized in groups to ease routing in firmwares:
 
 |  Group  | Name                             | Description|
@@ -126,6 +136,11 @@ This packet is meaningful only in ESB mode.
 Packet sent 100 times per second to the STM32. Contains the power value
 of the latest received packet. The value is the same as reported by the
 NRF51: between 40 and 100 which means measurement of -40dBm to -100dBm.
+
+**Note**: despite being unrelated to power management, this report is
+emitted from inside the same `enableBatteryAutoupdate` check as
+SYSLINK\_PM\_BATTERY\_STATE. No RSSI is sent until the STM32 has sent a
+SYSLINK\_PM\_BATTERY\_AUTOUPDATE packet.
 
 ### SYSLINK\_RADIO\_ADDRESS
 

@@ -65,6 +65,82 @@ nothing to do with radio queue depth — see requirement 4.
 - `CKSUM` — two-byte Fletcher-8 checksum ([RFC 1146](https://tools.ietf.org/html/rfc1146))
   computed over `TYPE`, `LEN` and `DATA`
 
+## Bring-up: the link starts silent
+
+**The nRF51 sends nothing over the UART until the STM32 speaks first.** This is
+the designed behaviour and it is the first thing to get right — until it is
+satisfied, a perfectly working nRF51 is indistinguishable from a dead one.
+
+There are three independent gates.
+
+### Gate 1 — syslink transmit is disabled until a valid packet arrives
+
+`syslinkSend()` is a no-op until an inbound syslink packet has passed **both**
+checksum bytes. Until then the nRF51 emits no battery data, no RSSI, no MAVLink
+and no handshake. Any valid packet lifts the gate. It re-arms only when the nRF51
+powers the STM32 down (the `SYSOFF` radio bootloader command), so in normal
+operation it is a one-time handshake per boot.
+
+Send this — `SYSLINK_RADIO_READY`, zero length:
+
+```
+BC CF 0B 00 0B 16
+```
+
+**The nRF51 echoes the identical frame back.** That echo is the definitive
+proof that the serial link, baud rate, framing and checksum are all correct. It
+also satisfies gate 3 immediately.
+
+### Gate 2 — battery *and* RSSI both need enabling
+
+```
+BC CF 14 00 14 28      SYSLINK_PM_BATTERY_AUTOUPDATE, zero length
+```
+
+Note that the periodic RSSI report is emitted from inside the same
+`enableBatteryAutoupdate` check as the battery packet, despite being unrelated
+to it. Without this packet there is **no RSSI either**, which reads like a
+broken link rather than a disabled feature.
+
+### Gate 3 — the radio is deaf for the first 3 seconds
+
+Covered in requirement 7. It gates radio reception only, not the UART, so it is
+not what keeps the link quiet at boot.
+
+### Recommended boot sequence
+
+1. `BC CF 0B 00 0B 16` — activate syslink and the radio. **Expect the echo.**
+2. `BC CF 14 00 14 28` — enable battery and RSSI reporting.
+3. Radio configuration if the defaults are wrong: channel (`0x01`), datarate
+   (`0x02`), address (`0x05`). Each is echoed back as confirmation.
+
+After step 1 the nRF51 also sends an unsolicited `SYSLINK_RADIO_MAVLINK_SPACE`
+(`0x0E`, one byte, value 5). It reports on change and starts from an impossible
+value, so in practice it is the first packet the nRF51 ever sends.
+
+### Checksum, precisely
+
+Both bytes start at zero and cover `TYPE`, `LEN` and `DATA` — **not** the two
+start bytes:
+
+```
+for each byte b in (TYPE, LEN, DATA...):
+    cksum_a = (cksum_a + b)        & 0xFF
+    cksum_b = (cksum_b + cksum_a)  & 0xFF
+```
+
+Wire order is `START1 START2 TYPE LEN DATA CKSUM_A CKSUM_B` — **TYPE before
+LEN**. Swapping those two produces a well-formed frame that will never lift
+gate 1, with no error reported anywhere.
+
+### There is no debug output to look for
+
+`DEBUG_PRINT` on the nRF51 expands to nothing unless the firmware is built with
+`DEBUG_PRINT_ON_SEGGER_RTT`, and even then it goes to SEGGER RTT over SWD, not
+to the UART. There is no printf-to-serial path, and adding one would corrupt
+syslink because they share the port. The echo in gate 1 is the diagnostic to
+use instead.
+
 ## MAVLink packet types
 
 ### `SYSLINK_RADIO_MAVLINK` — `0x0C`
@@ -165,8 +241,13 @@ looks identical to a packet-format failure, so verify both ends agree before
 debugging anything else.
 
 **7. The radio is gated off for the first 3 seconds.** After boot the nRF51
-does not receive until either the STM32 sends `SYSLINK_RADIO_READY` (`0x0B`)
-or a 3-second timeout expires. Sending that packet early shortens startup.
+does not receive on the air until either the STM32 sends `SYSLINK_RADIO_READY`
+(`0x0B`) or a 3-second timeout expires. Sending that packet early shortens
+startup.
+
+This gate affects the radio only. It is **not** what stops the nRF51 talking
+over the UART at boot, and waiting out the timeout will not start the flow —
+see "Bring-up: the link starts silent" above, which is the gate that matters.
 
 ## Throughput
 
