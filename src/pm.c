@@ -29,6 +29,7 @@
 #include <nrf_gpiote.h>
 
 #include "pm.h"
+#include "nrf_temp.h"
 #include "button.h"
 #include "led.h"
 #include "systick.h"
@@ -466,7 +467,17 @@ void pmProcess() {
   // Check that environmental temp is OK for charging
   if (pmConfig->hasCharger && NRF_TEMP->EVENTS_DATARDY)
   {
-    temp = (float)(NRF_TEMP->TEMP / 4.0);
+    NRF_TEMP->EVENTS_DATARDY = 0;
+    // PAN-30: the temperature analog front end does not power down when
+    // DATARDY fires, so it has to be stopped explicitly.
+    NRF_TEMP->TASKS_STOP = 1;
+
+    // nrf_temp_read() rather than NRF_TEMP->TEMP directly, for PAN-28: the
+    // hardware does not sign extend negative measurements, so a sub-zero
+    // reading comes back as a large positive number. Tolerable when this
+    // only gated a coarse 15-60 degree charging window, not once the value
+    // is reported to the STM32 as telemetry.
+    temp = (float)nrf_temp_read() / 4.0f;
     if (temp < PM_CHARGE_MIN_TEMP || temp > PM_CHARGE_MAX_TEMP)
     {
       // Disable charging

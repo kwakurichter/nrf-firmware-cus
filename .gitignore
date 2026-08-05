@@ -19,3 +19,5 @@ s110/
 # jykell files
 docs/.jekyll-metadata
 docs/.jekyll-cache
+# macOS
+.DS_Store

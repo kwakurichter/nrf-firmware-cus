@@ -322,9 +322,14 @@ SYSLINK\_PM\_BATTERY\_STATE instead).
 -   **FLAGS**: Bit0: Charging. Bit1: USB Powered. Bit2: Can charge.
 -   **VBAT**: IEEE single float. Battery voltage.
 -   **ISET**: IEEE single float. Charge current in milli-Amperes.
--   **TEMP** (optional): IEEE single float. Temperature. Only present
-    when compiled with `PM_SYSLINK_INCLUDE_TEMP`, which adds 4 bytes
-    to the packet.
+-   **TEMP**: IEEE single float. nRF51 die temperature in degrees C.
+    Present only when compiled with `PM_SYSLINK_INCLUDE_TEMP`, which
+    takes the packet from 9 to 13 bytes. **This fork enables it**, so
+    the packet is 13 bytes.
+
+The die sensor is sampled for charge temperature control regardless, so
+reporting it is close to free. It measures the nRF51 die, not the
+battery or the air, and will read above ambient.
 
 The SYSLINK\_PM\_BATTERY\_STATE packet is sent 100 times per second to
 the STM32 (every 10ms). Sending is activated after the STM32 sends a

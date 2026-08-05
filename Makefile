@@ -210,6 +210,11 @@ ifeq ($(strip $(RADIOTEST)), 1)
 CFLAGS += -DRADIOTEST=1
 endif
 
+# Include the die temperature in SYSLINK_PM_BATTERY_STATE, taking it from 9
+# to 13 bytes. The sensor is sampled anyway for charge temperature control, so
+# reporting it costs one float on an already periodic packet.
+CFLAGS += -DPM_SYSLINK_INCLUDE_TEMP
+
 # Override the ESB payload ceiling. 32 or below keeps the legacy 6 bit on-air
 # length field, which is what a stock Crazyradio speaks -- useful for bisecting
 # whether a problem is the packet format or something else.

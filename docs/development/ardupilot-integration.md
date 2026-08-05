@@ -89,6 +89,33 @@ One byte: free unicast transmit slots, peaking at 5. Sent **unsolicited by the
 nRF51 whenever the count changes**. This is the backpressure signal — see
 requirement 4.
 
+## Battery telemetry
+
+Unrelated to the MAVLink types, but the STM32 will want it.
+
+`SYSLINK_PM_BATTERY_STATE` (`0x13`) is sent by the nRF51 at 100 Hz once the
+STM32 enables it with `SYSLINK_PM_BATTERY_AUTOUPDATE` (`0x14`).
+
+```
++-------+------+------+------+
+| FLAGS | VBAT | ISET | TEMP |
++-------+------+------+------+
+ 1 byte   4       4      4
+```
+
+- `FLAGS` — bit0 charging, bit1 USB powered, bit2 can charge
+- `VBAT` — float, battery volts
+- `ISET` — float, charge current in mA
+- `TEMP` — float, nRF51 **die** temperature in degrees C
+
+**This build is 13 bytes**, with `TEMP` present (`PM_SYSLINK_INCLUDE_TEMP` is
+enabled). Upstream defaults to 9 bytes without it. Accepting both lengths is
+still the robust choice, since the field is a compile-time option and someone
+will eventually build without it — but 13 is what you will see here.
+
+`TEMP` is the die sensor, not the battery or ambient, so it reads above room
+temperature. It is sampled anyway for charge temperature control.
+
 ## Operating requirements
 
 These are the constraints that will cause silent, hard-to-diagnose failures if
