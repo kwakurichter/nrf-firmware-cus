@@ -59,7 +59,7 @@ class Ack:
 
 
 class Crazyradio2:
-    def __init__(self, index=0):
+    def __init__(self, index=0, warn_ambiguous=True):
         devices = list(usb.core.find(find_all=True,
                                      idVendor=CRAZYRADIO_VID,
                                      idProduct=CRAZYRADIO_PID))
@@ -68,7 +68,7 @@ class Crazyradio2:
         if index >= len(devices):
             raise RuntimeError(
                 f"Crazyradio index {index} requested, {len(devices)} present")
-        if len(devices) > 1:
+        if warn_ambiguous and len(devices) > 1:
             print(f"warning: {len(devices)} dongles present, using index "
                   f"{index}. Which one that is depends on enumeration order, "
                   f"which is not stable across replug.")
