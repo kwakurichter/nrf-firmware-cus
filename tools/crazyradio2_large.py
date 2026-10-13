@@ -18,6 +18,7 @@ Run directly for a self-test:
 """
 
 import sys
+import time
 
 import usb.core
 import usb.util
@@ -73,6 +74,10 @@ class Crazyradio2:
                   f"{index}. Which one that is depends on enumeration order, "
                   f"which is not stable across replug.")
 
+        self.last_error = None
+        self.last_slow_read = None
+        self.read_duration_ms = 0
+        self.answer_length = 0
         self.dev = devices[index]
         self.dev.set_configuration()
 
@@ -105,6 +110,9 @@ class Crazyradio2:
     def send_packet(self, data, timeout=1000):
         """Send a packet and return the Ack, or None on USB timeout."""
         data = bytes(data)
+        self.read_duration_ms = 0
+        self.answer_length = 0
+        stage = "bulk OUT"
         try:
             self.dev.write(EP_OUT, data, timeout)
 
@@ -115,12 +123,23 @@ class Crazyradio2:
             # Never came up under the legacy protocol, where packets capped at
             # 32 bytes; at 252 it bites on 64, 128 and 192.
             if data and len(data) % EP_MAX_PACKET == 0:
+                stage = "bulk OUT terminator"
                 self.dev.write(EP_OUT, b"", timeout)
 
             # Request the full length so libusb reassembles multi-packet
             # transfers. This is the line cflib gets wrong.
+            stage = "bulk IN"
+            started = time.monotonic()
             raw = self.dev.read(EP_IN, MAX_ANSWER, timeout)
-        except usb.core.USBError:
+            self.read_duration_ms = (time.monotonic() - started) * 1000
+            self.answer_length = len(raw)
+            # PyUSB/libusb returns partial data on timeout without raising.
+            if self.read_duration_ms >= timeout * 0.9:
+                self.last_slow_read = {"elapsed_ms": self.read_duration_ms,
+                                       "length": len(raw), "timeout_ms": timeout}
+        except usb.core.USBError as exc:
+            self.last_error = {"stage": stage, "error": str(exc), "errno": exc.errno,
+                               "backend_error_code": exc.backend_error_code}
             return None
 
         if raw is None or len(raw) < 1:

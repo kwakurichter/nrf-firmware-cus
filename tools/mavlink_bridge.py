@@ -39,6 +39,8 @@ length, so it truncates any ack payload above that.
 
 import argparse
 import collections
+import json
+import select
 import socket
 import sys
 import threading
@@ -164,17 +166,36 @@ class Vehicle:
         self.counts = collections.Counter()
         self.stats = collections.Counter()
 
+        self._downlink_bytes = bytearray()
         self._pending = collections.deque()
         self._lock = threading.Lock()
 
     def queue_frame(self, frame):
         chunks = chunk_frame(frame)
         with self._lock:
-            self._pending.extend(chunks)
+            queued = time.monotonic()
+            self._pending.extend((queued, chunk) for chunk in chunks)
 
     def next_chunk(self):
         with self._lock:
-            return self._pending.popleft() if self._pending else None
+            if not self._pending:
+                return None
+            queued, chunk = self._pending.popleft()
+            self.stats["queue_wait_max_ms"] = max(
+                self.stats["queue_wait_max_ms"], (time.monotonic() - queued) * 1000)
+            return chunk
+
+    def pending_status(self):
+        with self._lock:
+            age = time.monotonic() - self._pending[0][0] if self._pending else 0
+            return {"chunks": len(self._pending), "oldest_ms": age * 1000}
+
+    def downlink_frames(self, data):
+        # Each aircraft owns a byte stream. Never interleave oversized-frame
+        # fragments from separate aircraft in the GCS's single UDP parser.
+        self.observe(data)
+        self._downlink_bytes.extend(data)
+        return split_frames(self._downlink_bytes)
 
     def observe(self, data):
         if self.parser is None:
@@ -186,7 +207,8 @@ class Vehicle:
                     self.counts["BAD_DATA"] += 1
                     continue
                 self.counts[name] += 1
-                if self.sysid is None:
+                if (name == "HEARTBEAT" and msg.get_srcComponent() == 1
+                        and msg.autopilot != 8 and msg.get_srcSystem() != 0):
                     self.sysid = msg.get_srcSystem()
         except Exception:  # noqa: BLE001
             pass
@@ -268,7 +290,10 @@ class RadioGroup(threading.Thread):
                 if not self._running:
                     break
 
+                poll_started = time.monotonic()
                 self._tune(vehicle)
+                vehicle.stats["tune_max_ms"] = max(
+                    vehicle.stats["tune_max_ms"], (time.monotonic() - poll_started) * 1000)
 
                 chunk = vehicle.next_chunk()
                 if chunk is not None:
@@ -281,11 +306,19 @@ class RadioGroup(threading.Thread):
 
                 ack = self.radio.send_packet(payload)
                 vehicle.stats["polls"] += 1
+                vehicle.stats["poll_max_ms"] = max(
+                    vehicle.stats["poll_max_ms"], (time.monotonic() - poll_started) * 1000)
 
                 if ack is None:
                     vehicle.stats["usb_err"] += 1
                     time.sleep(0.01)
                     continue
+
+                vehicle.stats["retries"] += ack.retry
+                if self.radio.read_duration_ms >= 900:
+                    vehicle.stats["slow_usb_reads"] += 1
+                    if self.radio.answer_length % 64 == 0:
+                        vehicle.stats["slow_usb_reads_multiple_64"] += 1
 
                 if not ack.ack:
                     # Out of range, powered down, or on another channel.
@@ -297,8 +330,9 @@ class RadioGroup(threading.Thread):
                     if down:
                         vehicle.stats["down_pkts"] += 1
                         vehicle.stats["down_bytes"] += len(down)
-                        vehicle.observe(down)
-                        self.on_downlink(vehicle, down)
+                        for frame in vehicle.downlink_frames(down):
+                            self.on_downlink(vehicle, frame)
+                            vehicle.stats["down_frames"] += 1
                         round_had_traffic = True
 
             # Back off only when the whole round was quiet. Sleeping per
@@ -310,8 +344,8 @@ class RadioGroup(threading.Thread):
 class Router:
     """Decides which vehicle an uplink frame belongs to.
 
-    The mapping is learned from downlink: whichever vehicle a system id was
-    last heard from is where its commands go. Anything targeted at a system we
+    The mapping is learned from CRC-validated autopilot heartbeats. Conflicting
+    system IDs are not eligible for targeted commands; restart after fixing IDs. Anything targeted at a system we
     have not heard from, or not targeted at all, goes to every vehicle --
     they ignore what is not addressed to them, so the cost is bandwidth rather
     than confusion. Duplicating everything unconditionally would instead make
@@ -321,12 +355,17 @@ class Router:
     def __init__(self):
         self._sysid_vehicle = {}
         self._parser = make_parser()
+        self._conflicts = set()
         self._lock = threading.Lock()
 
     def learn(self, sysid, vehicle):
         if sysid is None or sysid == 0:
             return
         with self._lock:
+            previous = self._sysid_vehicle.get(sysid)
+            if previous is not None and previous is not vehicle:
+                self._conflicts.add(sysid)
+                return
             self._sysid_vehicle[sysid] = vehicle
 
     def target_of(self, frame):
@@ -347,6 +386,8 @@ class Router:
         target = self.target_of(frame)
         if target:
             with self._lock:
+                if target in self._conflicts:
+                    return []
                 vehicle = self._sysid_vehicle.get(target)
             if vehicle is not None:
                 return [vehicle]
@@ -374,6 +415,8 @@ def main():
                          "traffic (default 2.0)")
     ap.add_argument("--status-sec", type=float, default=2.0,
                     help="seconds between status lines (default 2.0)")
+    ap.add_argument("--stats-jsonl", metavar="PATH",
+                    help="write cumulative per-vehicle counters and queue/timing diagnostics to a new JSONL file")
     ap.add_argument("--quiet", action="store_true",
                     help="suppress the periodic status line")
     args = ap.parse_args()
@@ -403,7 +446,7 @@ def main():
     router = Router()
 
     def on_downlink(vehicle, data):
-        router.learn(frame_src_system(data), vehicle)
+        router.learn(vehicle.sysid, vehicle)
         if sock is not None and peer is not None:
             try:
                 sock.sendto(data, peer)
@@ -469,20 +512,25 @@ def main():
     else:
         print("\nObserve only. Pass --udp 127.0.0.1:14550 to feed a GCS.")
 
+    stats_file = open(args.stats_jsonl, "x", buffering=1) if args.stats_jsonl else None
     for g in groups:
         g.start()
 
     uplink_bytes = bytearray()
-    last_status = time.time()
+    last_status = time.monotonic()
+    previous_stats = {}
 
     print("\nPolling. Ctrl-C to stop.\n")
 
     try:
         while True:
             if sock is not None:
-                while True:
+                # Sleep when UDP is idle and bound each burst so diagnostics
+                # and radio threads still run under sustained GCS traffic.
+                select.select([sock], [], [], 0.01)
+                for _ in range(64):
                     try:
-                        data, src = sock.recvfrom(4096)
+                        data, src = sock.recvfrom(65535)
                     except BlockingIOError:
                         break
                     except OSError:
@@ -496,40 +544,49 @@ def main():
             else:
                 time.sleep(0.01)
 
-            now = time.time()
-            if not args.quiet and now - last_status >= args.status_sec:
+            now = time.monotonic()
+            if now - last_status >= args.status_sec:
                 elapsed = now - last_status
-                print(f"[{time.strftime('%H:%M:%S')}]")
                 for g in groups:
-                    tag = ""
-                    if len(g.vehicles) > 1:
-                        tag = f"  retunes {g.retunes}"
-                        g.retunes = 0
-                    print(f"  dongle{g.index} [{g.usb_id}]{tag}")
                     for v in g.vehicles:
-                        s = v.stats
-                        print(f"    {v.label():<18} "
-                              f"down {s['down_bytes']:5d}B/{s['down_pkts']:<4d} "
-                              f"up {s['up_bytes']:4d}B/{s['up_chunks']:<3d} "
-                              f"polls {s['polls']:4d} "
-                              f"({s['polls'] / elapsed:4.0f}/s) "
-                              f"no-ack {s['no_ack']:<4d} err {s['usb_err']}")
-                        print(f"    {'':<18} {v.summary()}")
-                        v.stats.clear()
-                routed = router.known()
-                if len(vehicles) > 1 and routed:
-                    mapping = ", ".join(
-                        f"sys{sid}->{v.address.hex()}"
-                        for sid, v in sorted(routed.items()))
-                    print(f"  uplink routing: {mapping}")
+                        # Cumulative counters avoid clearing a worker's updates.
+                        totals = dict(v.stats)
+                        old = previous_stats.get(v.uri, {})
+                        delta = {key: value - old.get(key, 0) for key, value in totals.items()}
+                        previous_stats[v.uri] = totals
+                        pending = v.pending_status()
+                        if stats_file:
+                            stats_file.write(json.dumps({
+                                "monotonic": now, "dongle": g.index, "usb_id": g.usb_id,
+                                "uri": v.uri, "sysid": v.sysid, "counters": totals,
+                                "queue": pending, "last_usb_error": g.radio.last_error,
+                                "last_slow_usb_read": g.radio.last_slow_read, "worker_alive": g.is_alive(),
+                                "routing_conflicts": sorted(router._conflicts),
+                            }) + "\n")
+                        if not args.quiet:
+                            print(f"dongle{g.index} {v.label()} sys{v.sysid} "
+                                  f"polls {delta.get('polls', 0) / elapsed:.0f}/s "
+                                  f"down {delta.get('down_bytes', 0) / elapsed:.0f}B/s "
+                                  f"no-ack {delta.get('no_ack', 0)} USB errors {delta.get('usb_err', 0)} "
+                                  f"queue {pending['chunks']} ({pending['oldest_ms']:.0f}ms) "
+                                  f"max poll {totals.get('poll_max_ms', 0):.1f}ms "
+                                  f"max tune {totals.get('tune_max_ms', 0):.1f}ms "
+                                  f"slow USB reads {delta.get('slow_usb_reads', 0)}", flush=True)
+                            if delta.get('usb_err', 0):
+                                print(f"  last USB error: {g.radio.last_error}", flush=True)
                 last_status = now
 
     except KeyboardInterrupt:
         print("\nStopping...")
+    finally:
         for g in groups:
             g.stop()
         for g in groups:
             g.join(timeout=1.0)
+        if stats_file:
+            stats_file.close()
+        if sock:
+            sock.close()
         print("Stopped.")
 
     return 0
