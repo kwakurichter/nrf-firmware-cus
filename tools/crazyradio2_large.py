@@ -59,27 +59,46 @@ class Ack:
                 f"len={len(self.data)})")
 
 
+def find_devices():
+    """Every attached Crazyradio, in libusb enumeration order."""
+    return list(usb.core.find(find_all=True,
+                              idVendor=CRAZYRADIO_VID,
+                              idProduct=CRAZYRADIO_PID))
+
+
 class Crazyradio2:
-    def __init__(self, index=0, warn_ambiguous=True):
-        devices = list(usb.core.find(find_all=True,
-                                     idVendor=CRAZYRADIO_VID,
-                                     idProduct=CRAZYRADIO_PID))
-        if not devices:
-            raise RuntimeError("No Crazyradio found")
-        if index >= len(devices):
-            raise RuntimeError(
-                f"Crazyradio index {index} requested, {len(devices)} present")
-        if warn_ambiguous and len(devices) > 1:
-            print(f"warning: {len(devices)} dongles present, using index "
-                  f"{index}. Which one that is depends on enumeration order, "
-                  f"which is not stable across replug.")
+    def __init__(self, index=0, warn_ambiguous=True, device=None):
+        """Open dongle `index`, or exactly `device` when one is given.
+
+        `device` lets a caller reopen a replugged dongle without relying on
+        enumeration order, which is not stable across replug.
+        """
+        if device is None:
+            devices = find_devices()
+            if not devices:
+                raise RuntimeError("No Crazyradio found")
+            if index >= len(devices):
+                raise RuntimeError(
+                    f"Crazyradio index {index} requested, {len(devices)} present")
+            if warn_ambiguous and len(devices) > 1:
+                print(f"warning: {len(devices)} dongles present, using index "
+                      f"{index}. Which one that is depends on enumeration order, "
+                      f"which is not stable across replug.")
+            device = devices[index]
 
         self.last_error = None
         self.last_slow_read = None
         self.read_duration_ms = 0
         self.answer_length = 0
-        self.dev = devices[index]
+        self.dev = device
         self.dev.set_configuration()
+
+    def close(self):
+        """Release the USB handle so the device can be reopened."""
+        try:
+            usb.util.dispose_resources(self.dev)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _vendor_out(self, request, value=0, index=0, data=None):
         # 0x40 = host-to-device | vendor | device

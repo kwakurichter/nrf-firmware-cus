@@ -48,7 +48,7 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 
-from crazyradio2_large import Crazyradio2, DR_250K, DR_1M, DR_2M  # noqa: E402
+from crazyradio2_large import Crazyradio2, DR_250K, DR_1M, DR_2M, find_devices  # noqa: E402
 
 # Must match MAVLINK_AIR_MARKER in the Crazyflie's mavlink_transport.h.
 MAVLINK_AIR_MARKER = 0xE0
@@ -170,6 +170,12 @@ class Vehicle:
         self._pending = collections.deque()
         self._lock = threading.Lock()
 
+        # When this address last acknowledged a poll; None until it first does.
+        # A RadioGroup polls a silent address slowly (see SILENT_AFTER_S).
+        self.last_ack = None
+        self.silent = False
+        self.next_slow_poll = 0.0
+
     def queue_frame(self, frame):
         chunks = chunk_frame(frame)
         with self._lock:
@@ -184,6 +190,20 @@ class Vehicle:
             self.stats["queue_wait_max_ms"] = max(
                 self.stats["queue_wait_max_ms"], (time.monotonic() - queued) * 1000)
             return chunk
+
+    def drop_stale(self, max_age):
+        """Discard queued chunks older than max_age seconds.
+
+        Chunks of one frame share a timestamp, so frames go whole.
+        """
+        with self._lock:
+            cutoff = time.monotonic() - max_age
+            dropped = 0
+            while self._pending and self._pending[0][0] < cutoff:
+                self._pending.popleft()
+                dropped += 1
+        if dropped:
+            self.stats["dropped_stale_chunks"] += dropped
 
     def pending_status(self):
         with self._lock:
@@ -224,6 +244,34 @@ class Vehicle:
         return f"{who} {top}"
 
 
+class RadioFailure(RuntimeError):
+    """The dongle stopped answering; the worker reopens it."""
+
+
+# Consecutive failed bulk transfers before the dongle is treated as gone.
+# Each failure sleeps 10 ms, so this is roughly half a second of silence.
+USB_ERRORS_BEFORE_REOPEN = 50
+REOPEN_BACKOFF_MAX_S = 2.0
+
+# A vehicle sharing a dongle that has not acknowledged a poll for this long is
+# treated as absent (switched off, out of range, wrong address) and polled only
+# every SILENT_POLL_INTERVAL_S. A failed poll costs the dongle's whole retry
+# burst, so polling an absent address at full rate starves the drones sharing
+# its dongle. Its queued uplink older than SILENT_QUEUE_MAX_AGE_S is dropped.
+SILENT_AFTER_S = 1.0
+SILENT_POLL_INTERVAL_S = 0.25
+SILENT_QUEUE_MAX_AGE_S = 2.0
+
+# Dongles held by a RadioGroup in this process, keyed by USB bus and address,
+# so a group reopening after a replug never grabs another group's dongle.
+_claimed_lock = threading.Lock()
+_claimed = set()
+
+
+def _usb_key(dev):
+    return (dev.bus, dev.address)
+
+
 class RadioGroup(threading.Thread):
     """One Crazyradio serving one or more vehicles by time-multiplexing.
 
@@ -231,29 +279,90 @@ class RadioGroup(threading.Thread):
     this costs nothing over a dedicated link. With several, the dongle retunes
     between polls -- one USB control transfer for the address, plus another for
     the channel if they differ, which is why sharing a channel is cheaper.
+
+    A USB failure never ends the thread. A control-transfer exception or a run
+    of failed bulk transfers closes the dongle and reopens the first Crazyradio
+    no other group holds, retrying with backoff until one appears. Tuning lives
+    here rather than in the dongle, so which physical dongle comes back does
+    not matter. `on_event` receives a one-line description of each failure and
+    recovery.
     """
 
-    def __init__(self, index, vehicles, on_downlink, idle_poll_ms):
+    def __init__(self, index, vehicles, on_downlink, idle_poll_ms, on_event=None):
         super().__init__(daemon=True)
 
         self.index = index
         self.vehicles = vehicles
         self.on_downlink = on_downlink
+        self.on_event = on_event or (lambda text: None)
         self.idle_poll_s = idle_poll_ms / 1000.0
 
-        self.radio = Crazyradio2(index, warn_ambiguous=False)
-        self.radio.set_ack_enabled(True)
-        self.radio.set_large_packet_mode(True)
+        self.radio = None
+        self.usb_id = None
+        self._open(Crazyradio2(index, warn_ambiguous=False))
 
-        dev = self.radio.dev
+        self.retunes = 0
+        self.failures = 0
+        self.reopens = 0
+        self.last_failure = None
+        self._usb_error_streak = 0
+        self._created_at = time.monotonic()
+        self._running = True
+
+    def _open(self, radio):
+        radio.set_ack_enabled(True)
+        radio.set_large_packet_mode(True)
+        self.radio = radio
+        dev = radio.dev
         self.usb_id = f"bus{dev.bus}.addr{dev.address}"
-
+        with _claimed_lock:
+            _claimed.add(_usb_key(dev))
+        # A fresh or replugged dongle holds none of our settings.
         self._tuned_channel = None
         self._tuned_rate = None
         self._tuned_address = None
 
-        self.retunes = 0
-        self._running = True
+    def _close(self):
+        if self.radio is None:
+            return
+        with _claimed_lock:
+            _claimed.discard(_usb_key(self.radio.dev))
+        close = getattr(self.radio, "close", None)
+        if close is not None:
+            close()
+
+    def _reopen(self):
+        """Open the first unclaimed Crazyradio; return True on success."""
+        with _claimed_lock:
+            held = set(_claimed)
+        for dev in find_devices():
+            if _usb_key(dev) in held:
+                continue
+            try:
+                self._open(Crazyradio2(device=dev))
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    def _recover(self, exc):
+        self.failures += 1
+        self.last_failure = f"{type(exc).__name__}: {exc}"
+        self.on_event(f"dongle {self.index} [{self.usb_id}] failed ({self.last_failure}); reopening")
+        self._close()
+        self.radio = None
+        delay = 0.25
+        while self._running:
+            time.sleep(delay)
+            try:
+                if self._reopen():
+                    self.reopens += 1
+                    self._usb_error_streak = 0
+                    self.on_event(f"dongle {self.index} reopened as [{self.usb_id}]")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            delay = min(delay * 2, REOPEN_BACKOFF_MAX_S)
 
     def stop(self):
         self._running = False
@@ -281,64 +390,110 @@ class RadioGroup(threading.Thread):
             self.retunes += 1
 
     def run(self):
-        poll_marker = bytes([MAVLINK_AIR_MARKER])
-
         while self._running:
-            round_had_traffic = False
-
-            for vehicle in self.vehicles:
+            try:
+                self._poll_round()
+            except Exception as exc:  # noqa: BLE001
                 if not self._running:
                     break
+                self._recover(exc)
 
-                poll_started = time.monotonic()
-                self._tune(vehicle)
-                vehicle.stats["tune_max_ms"] = max(
-                    vehicle.stats["tune_max_ms"], (time.monotonic() - poll_started) * 1000)
+    def _deliver(self, vehicle, frame):
+        # A consumer bug must not be mistaken for a dongle failure.
+        try:
+            self.on_downlink(vehicle, frame)
+        except Exception as exc:  # noqa: BLE001
+            vehicle.stats["downlink_handler_errors"] += 1
+            self.on_event(f"downlink handler error for {vehicle.uri}: {type(exc).__name__}: {exc}")
 
-                chunk = vehicle.next_chunk()
-                if chunk is not None:
-                    payload = poll_marker + chunk
-                    vehicle.stats["up_chunks"] += 1
-                    vehicle.stats["up_bytes"] += len(chunk)
+    def _skip_silent(self, vehicle, now):
+        """True when an absent vehicle on a shared dongle is not due a poll."""
+        if len(self.vehicles) < 2:
+            return False
+        reference = vehicle.last_ack if vehicle.last_ack is not None else self._created_at
+        silent = now - reference > SILENT_AFTER_S
+        if silent != vehicle.silent:
+            vehicle.silent = silent
+            if silent:
+                self.on_event(f"{vehicle.uri}: no ack for {now - reference:.1f} s; polling it "
+                              f"{1 / SILENT_POLL_INTERVAL_S:.0f}x/s until it answers")
+            else:
+                self.on_event(f"{vehicle.uri}: answering again; full polling rate")
+        if not silent:
+            return False
+        vehicle.drop_stale(SILENT_QUEUE_MAX_AGE_S)
+        if now < vehicle.next_slow_poll:
+            vehicle.stats["skipped_polls"] += 1
+            return True
+        vehicle.next_slow_poll = now + SILENT_POLL_INTERVAL_S
+        return False
+
+    def _poll_round(self):
+        poll_marker = bytes([MAVLINK_AIR_MARKER])
+        round_had_traffic = False
+
+        for vehicle in self.vehicles:
+            if not self._running:
+                break
+
+            poll_started = time.monotonic()
+            if self._skip_silent(vehicle, poll_started):
+                continue
+            self._tune(vehicle)
+            vehicle.stats["tune_max_ms"] = max(
+                vehicle.stats["tune_max_ms"], (time.monotonic() - poll_started) * 1000)
+
+            chunk = vehicle.next_chunk()
+            if chunk is not None:
+                payload = poll_marker + chunk
+                vehicle.stats["up_chunks"] += 1
+                vehicle.stats["up_bytes"] += len(chunk)
+                round_had_traffic = True
+            else:
+                payload = poll_marker
+
+            ack = self.radio.send_packet(payload)
+            vehicle.stats["polls"] += 1
+            vehicle.stats["poll_max_ms"] = max(
+                vehicle.stats["poll_max_ms"], (time.monotonic() - poll_started) * 1000)
+
+            if ack is None:
+                vehicle.stats["usb_err"] += 1
+                self._usb_error_streak += 1
+                if self._usb_error_streak >= USB_ERRORS_BEFORE_REOPEN:
+                    raise RadioFailure(f"{self._usb_error_streak} consecutive USB errors, "
+                                       f"last {self.radio.last_error}")
+                time.sleep(0.01)
+                continue
+
+            self._usb_error_streak = 0
+            vehicle.stats["retries"] += ack.retry
+            if self.radio.read_duration_ms >= 900:
+                vehicle.stats["slow_usb_reads"] += 1
+                if self.radio.answer_length % 64 == 0:
+                    vehicle.stats["slow_usb_reads_multiple_64"] += 1
+
+            if not ack.ack:
+                # Out of range, powered down, or on another channel.
+                vehicle.stats["no_ack"] += 1
+                continue
+
+            vehicle.last_ack = time.monotonic()
+
+            if ack.data and ack.data[0] == MAVLINK_AIR_MARKER:
+                down = ack.data[1:]
+                if down:
+                    vehicle.stats["down_pkts"] += 1
+                    vehicle.stats["down_bytes"] += len(down)
+                    for frame in vehicle.downlink_frames(down):
+                        self._deliver(vehicle, frame)
+                        vehicle.stats["down_frames"] += 1
                     round_had_traffic = True
-                else:
-                    payload = poll_marker
 
-                ack = self.radio.send_packet(payload)
-                vehicle.stats["polls"] += 1
-                vehicle.stats["poll_max_ms"] = max(
-                    vehicle.stats["poll_max_ms"], (time.monotonic() - poll_started) * 1000)
-
-                if ack is None:
-                    vehicle.stats["usb_err"] += 1
-                    time.sleep(0.01)
-                    continue
-
-                vehicle.stats["retries"] += ack.retry
-                if self.radio.read_duration_ms >= 900:
-                    vehicle.stats["slow_usb_reads"] += 1
-                    if self.radio.answer_length % 64 == 0:
-                        vehicle.stats["slow_usb_reads_multiple_64"] += 1
-
-                if not ack.ack:
-                    # Out of range, powered down, or on another channel.
-                    vehicle.stats["no_ack"] += 1
-                    continue
-
-                if ack.data and ack.data[0] == MAVLINK_AIR_MARKER:
-                    down = ack.data[1:]
-                    if down:
-                        vehicle.stats["down_pkts"] += 1
-                        vehicle.stats["down_bytes"] += len(down)
-                        for frame in vehicle.downlink_frames(down):
-                            self.on_downlink(vehicle, frame)
-                            vehicle.stats["down_frames"] += 1
-                        round_had_traffic = True
-
-            # Back off only when the whole round was quiet. Sleeping per
-            # vehicle would make each idle drone delay the others.
-            if not round_had_traffic:
-                time.sleep(self.idle_poll_s)
+        # Back off only when the whole round was quiet. Sleeping per
+        # vehicle would make each idle drone delay the others.
+        if not round_had_traffic:
+            time.sleep(self.idle_poll_s)
 
 
 class Router:
@@ -396,6 +551,41 @@ class Router:
     def known(self):
         with self._lock:
             return dict(self._sysid_vehicle)
+
+
+def configuration_warnings(by_index):
+    """Radio-plan problems for {dongle index: [Vehicle, ...]}, as sentences."""
+    warnings = []
+
+    # Two dongles on one frequency collide: no carrier sense, and the dongle
+    # retries in a tight loop with no backoff, so a long ack can swallow a
+    # whole retry burst.
+    groups_per_channel = collections.Counter()
+    for members in by_index.values():
+        for ch in {v.channel for v in members}:
+            groups_per_channel[ch] += 1
+    shared = sorted(ch for ch, n in groups_per_channel.items() if n > 1)
+    if shared:
+        warnings.append(
+            f"channel {shared[0]} is used by more than one dongle. ESB has no "
+            f"carrier sense and no retry backoff, so they will collide. "
+            f"Either give them separate channels, or put both vehicles on one "
+            f"dongle by giving their URIs the same index.")
+
+    # Retuning the channel costs a second control transfer per switch.
+    for index, members in by_index.items():
+        if len({v.channel for v in members}) > 1:
+            warnings.append(
+                f"dongle {index} round-robins across different channels, "
+                f"which adds a control transfer per switch. Keeping shared "
+                f"vehicles on one channel is cheaper -- and P2P between them "
+                f"requires it anyway.")
+
+    addrs = [v.address for members in by_index.values() for v in members]
+    if len(addrs) != len(set(addrs)):
+        warnings.append("two URIs use the same radio address, so they are "
+                        "talking to the same vehicle.")
+    return warnings
 
 
 def main():
@@ -456,7 +646,8 @@ def main():
     groups = []
     for index, members in by_index.items():
         try:
-            group = RadioGroup(index, members, on_downlink, args.idle_poll_ms)
+            group = RadioGroup(index, members, on_downlink, args.idle_poll_ms,
+                               on_event=lambda text: print(f"\n{text}", flush=True))
         except Exception as exc:  # noqa: BLE001
             print(f"Could not open dongle index {index}: {exc}")
             print("Check it is plugged in and running the large-packet "
@@ -469,36 +660,7 @@ def main():
         for v in members:
             print(f"    {v.uri}")
 
-    warnings = []
-
-    # Two dongles on one frequency collide: no carrier sense, and the dongle
-    # retries in a tight loop with no backoff, so a long ack can swallow a
-    # whole retry burst.
-    groups_per_channel = collections.Counter()
-    for g in groups:
-        for ch in {v.channel for v in g.vehicles}:
-            groups_per_channel[ch] += 1
-    shared = sorted(ch for ch, n in groups_per_channel.items() if n > 1)
-    if shared:
-        warnings.append(
-            f"channel {shared[0]} is used by more than one dongle. ESB has no "
-            f"carrier sense and no retry backoff, so they will collide. "
-            f"Either give them separate channels, or put both vehicles on one "
-            f"dongle by giving their URIs the same index.")
-
-    # Retuning the channel costs a second control transfer per switch.
-    for g in groups:
-        if len({v.channel for v in g.vehicles}) > 1:
-            warnings.append(
-                f"dongle {g.index} round-robins across different channels, "
-                f"which adds a control transfer per switch. Keeping shared "
-                f"vehicles on one channel is cheaper -- and P2P between them "
-                f"requires it anyway.")
-
-    addrs = [v.address for v in vehicles]
-    if len(addrs) != len(set(addrs)):
-        warnings.append("two URIs use the same radio address, so they are "
-                        "talking to the same vehicle.")
+    warnings = configuration_warnings(by_index)
 
     for w in warnings:
         print(f"\nWARNING: {w}")
